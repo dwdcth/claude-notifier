@@ -4,7 +4,7 @@
 [![Go](https://img.shields.io/github/go-mod/go-version/felipeelias/claude-notifier)](https://github.com/felipeelias/claude-notifier/blob/main/go.mod)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://github.com/felipeelias/claude-notifier/blob/main/LICENSE)
 
-Notification dispatcher for [Claude Code](https://docs.anthropic.com/en/docs/claude-code) hooks. Reads JSON from stdin, fans out to all configured notification channels concurrently. Single static binary, compiled-in plugins, TOML configuration.
+Notification dispatcher and **remote permission approver** for [Claude Code](https://docs.anthropic.com/en/docs/claude-code) hooks. Reads JSON from stdin, fans out to all configured notification channels concurrently. Also supports remote approval of Claude Code permission requests via ntfy push notifications. Single static binary, compiled-in plugins, TOML configuration.
 
 ## Why
 
@@ -17,6 +17,7 @@ claude-notifier is a single binary that handles all of that:
 - Sends to multiple channels from one hook (ntfy, desktop, Slack, etc.)
 - Same binary and config file across Linux, macOS, and Windows
 - Always exits 0 so it never breaks your hook
+- **Remote approval**: approve/deny Claude Code permission requests from your phone
 - `claude-notifier init`, edit the TOML, you're done
 
 ## Install
@@ -88,6 +89,21 @@ Add to your Claude Code settings (`~/.claude/settings.json`):
 
 Or install the Claude plugin which configures the hook automatically.
 
+### Remote approval setup
+
+To enable remote approval of Claude Code permission requests via ntfy:
+
+```bash
+claude-notifier setup
+```
+
+This will:
+1. Generate a random ntfy topic name
+2. Save the approver configuration to your config file
+3. Register the `PermissionRequest` hook in `~/.claude/settings.json`
+
+Subscribe to the generated topic in your ntfy mobile app to receive approval requests. When Claude Code needs permission, you'll get a push notification with Approve/Deny buttons.
+
 ## Configuration
 
 Run `claude-notifier init` to generate a config file with all available options documented. See [`config.example.toml`](config.example.toml) for the full reference.
@@ -123,6 +139,11 @@ echo '{"message":"Build complete","title":"Claude Code"}' | claude-notifier
 | `claude-notifier`           | Read JSON from stdin, dispatch to all notifiers |
 | `claude-notifier init`      | Create default config file                      |
 | `claude-notifier test`      | Send a test notification to all notifiers       |
+| `claude-notifier setup`     | Configure remote approval with ntfy             |
+| `claude-notifier status`    | Show remote approval configuration              |
+| `claude-notifier enable`    | Register the approval hook                      |
+| `claude-notifier disable`   | Unregister the approval hook                    |
+| `claude-notifier uninstall` | Remove approval hook and config                 |
 | `claude-notifier --version` | Print version                                   |
 
 ### Flags
