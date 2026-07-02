@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/felipeelias/claude-notifier/internal/approver"
@@ -103,6 +104,20 @@ func sendAction(cmd *ucli.Context, reg *notifier.Registry) error {
 		slog.Error("invalid notification", "error", err)
 
 		return nil // don't fail the hook
+	}
+
+	// For idle_prompt notifications, append the last user prompt and
+	// assistant reply (extracted from the transcript) to the original
+	// message so the user knows what conversation is waiting. Other
+	// notification types (permission_prompt, auth_success,
+	// elicitation_dialog) are left untouched.
+	if notif.NotificationType == "idle_prompt" {
+		userPrompt, assistantReply, extractErr := extractLastPromptAndReply(notif.TranscriptPath)
+		if extractErr != nil {
+			slog.Warn("extracting prompt/reply for idle notification", "error", extractErr, "transcript_path", notif.TranscriptPath)
+		} else if promptReply := formatPromptReply(userPrompt, assistantReply); promptReply != "" {
+			notif.Message = strings.Join([]string{notif.Message, promptReply}, "\n\n")
+		}
 	}
 
 	configPath := cmd.String("config")
@@ -486,6 +501,31 @@ func saveConfig(path string, cfg *config.Config) error {
 	return config.Save(path, cfg)
 }
 
+// formatPromptReply formats the user prompt and assistant reply as a
+// "💬 你: ...\n\n🤖 AI: ..." block. Empty values are skipped. Returns
+// an empty string if both inputs are empty.
+func formatPromptReply(userPrompt, assistantReply string) string {
+	var parts []string
+	if userPrompt != "" {
+		parts = append(parts, "💬 你: "+userPrompt)
+	}
+	if assistantReply != "" {
+		parts = append(parts, "🤖 AI: "+assistantReply)
+	}
+	return strings.Join(parts, "\n\n")
+}
+
+// buildStopMessage constructs the stop notification message. When the
+// last user prompt and/or assistant reply are available, they are
+// included (each truncated). Otherwise a plain "Conversation ended in
+// <project>" fallback is used.
+func buildStopMessage(project, userPrompt, assistantReply string) string {
+	if promptReply := formatPromptReply(userPrompt, assistantReply); promptReply != "" {
+		return promptReply
+	}
+	return fmt.Sprintf("Conversation ended in %s", project)
+}
+
 func stopCommand(reg *notifier.Registry) *ucli.Command {
 	return &ucli.Command{
 		Name:   "stop",
@@ -518,8 +558,15 @@ func stopAction(cmd *ucli.Context, reg *notifier.Registry) error {
 
 	project := filepath.Base(cwd)
 
+	userPrompt, assistantReply, extractErr := extractLastPromptAndReply(input.TranscriptPath)
+	if extractErr != nil {
+		slog.Warn("extracting last prompt/reply from transcript", "error", extractErr, "transcript_path", input.TranscriptPath)
+	}
+
+	msg := buildStopMessage(project, userPrompt, assistantReply)
+
 	notif := notifier.Notification{
-		Message:          fmt.Sprintf("Conversation ended in %s", project),
+		Message:          msg,
 		Title:            "Claude Code",
 		Cwd:              cwd,
 		SessionID:        input.SessionID,
