@@ -55,6 +55,7 @@ func New(version string, reg *notifier.Registry) *ucli.App {
 			enableCommand(),
 			disableCommand(),
 			uninstallCommand(),
+			stopCommand(reg),
 		},
 	}
 }
@@ -483,4 +484,73 @@ func unregisterHook(binPath string) error {
 
 func saveConfig(path string, cfg *config.Config) error {
 	return config.Save(path, cfg)
+}
+
+func stopCommand(reg *notifier.Registry) *ucli.Command {
+	return &ucli.Command{
+		Name:   "stop",
+		Usage:  "Handle Stop hook (called by Claude Code when conversation ends)",
+		Hidden: true,
+		Action: func(cmd *ucli.Context) error {
+			return stopAction(cmd, reg)
+		},
+	}
+}
+
+func stopAction(cmd *ucli.Context, reg *notifier.Registry) error {
+	const maxInputSize = 1 << 20 // 1 MiB
+	var input struct {
+		SessionID      string `json:"session_id"`
+		TranscriptPath string `json:"transcript_path"`
+		Cwd            string `json:"cwd"`
+		HookEventName  string `json:"hook_event_name"`
+	}
+
+	if err := json.NewDecoder(io.LimitReader(os.Stdin, maxInputSize)).Decode(&input); err != nil {
+		slog.Error("reading stop event from stdin", "error", err)
+		return nil // don't fail the hook
+	}
+
+	cwd := input.Cwd
+	if cwd == "" {
+		cwd, _ = os.Getwd()
+	}
+
+	project := filepath.Base(cwd)
+
+	notif := notifier.Notification{
+		Message:          fmt.Sprintf("Conversation ended in %s", project),
+		Title:            "Claude Code",
+		Cwd:              cwd,
+		SessionID:        input.SessionID,
+		TranscriptPath:   input.TranscriptPath,
+		NotificationType: "stop",
+	}
+
+	if err := notif.Validate(); err != nil {
+		slog.Error("invalid stop notification", "error", err)
+		return nil // don't fail the hook
+	}
+
+	configPath := cmd.String("config")
+	notifiers, cfg, err := loadNotifiers(configPath, reg)
+	if err != nil {
+		slog.Error("loading config", "error", err)
+		return nil // don't fail the hook
+	}
+
+	ctx := cmd.Context
+	if cfg.Global.Timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, cfg.Global.Timeout)
+		defer cancel()
+	}
+
+	if errs := dispatch.Send(ctx, notifiers, notif); len(errs) > 0 {
+		for _, err := range errs {
+			slog.Error("sending stop notification", "error", err)
+		}
+	}
+
+	return nil // always succeed
 }
