@@ -135,11 +135,21 @@ func sendAction(cmd *ucli.Context, reg *notifier.Registry) error {
 		defer cancel()
 	}
 
+	if !ShouldSend(notif.SessionID, notif.Message) {
+		slog.Info("skipping duplicate notification",
+			"session_id", notif.SessionID,
+			"type", notif.NotificationType,
+		)
+		return nil
+	}
+
 	if errs := dispatch.Send(ctx, notifiers, notif); len(errs) > 0 {
 		for _, err := range errs {
 			slog.Error("sending notification", "error", err)
 		}
 	}
+
+	Record(notif.SessionID, notif.Message)
 
 	return nil // always succeed
 }
@@ -593,11 +603,20 @@ func stopAction(cmd *ucli.Context, reg *notifier.Registry) error {
 		defer cancel()
 	}
 
+	if !ShouldSend(notif.SessionID, notif.Message) {
+		slog.Info("skipping duplicate stop notification",
+			"session_id", notif.SessionID,
+		)
+		return nil
+	}
+
 	if errs := dispatch.Send(ctx, notifiers, notif); len(errs) > 0 {
 		for _, err := range errs {
 			slog.Error("sending stop notification", "error", err)
 		}
 	}
+
+	Record(notif.SessionID, notif.Message)
 
 	return nil // always succeed
 }

@@ -159,10 +159,7 @@ func ProcessHook(ctx context.Context, req PermissionRequest, cfg ApproverConfig)
 	info := formatToolInfo(req)
 	title := buildNotificationTitle(req, cfg.TitlePrefix)
 	info = ntfyclient.StripMarkdown(info)
-
-	if len(info) > 4000 {
-		info = info[:4000]
-	}
+	info = ntfyclient.TruncateRunes(info, 4000)
 
 	withAlways := len(req.PermissionSuggestions) > 0
 	actions := ntfyclient.BuildApprovalActions(cfg.Server, cfg.Topic, requestID, withAlways, req.PermissionSuggestions)

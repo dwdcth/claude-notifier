@@ -282,6 +282,30 @@ func BuildApprovalActions(server, topic, requestID string, withAlwaysApprove boo
 	return actions
 }
 
+// TruncateRunes truncates s to at most max runes, appending "..." if
+// truncation occurred. It operates on runes rather than bytes so that
+// multi-byte UTF-8 sequences (e.g. Chinese characters) are never split
+// in half, which would produce invalid UTF-8 and confuse downstream
+// consumers (some ntfy clients mis-detect invalid UTF-8 as an attachment).
+func TruncateRunes(s string, max int) string {
+	runes := []rune(s)
+	if len(runes) > max {
+		return string(runes[:max]) + "..."
+	}
+	return s
+}
+
+// truncateRunesNoEllipsis is like TruncateRunes but does not append the
+// trailing "...". Used by callers that already impose a hard size limit
+// and cannot afford the extra bytes (e.g. StripMarkdown's 4000-rune cap).
+func truncateRunesNoEllipsis(s string, max int) string {
+	runes := []rune(s)
+	if len(runes) > max {
+		return string(runes[:max])
+	}
+	return s
+}
+
 func StripMarkdown(input string) string {
 	var buf bytes.Buffer
 	lines := strings.Split(input, "\n")
@@ -320,9 +344,7 @@ func StripMarkdown(input string) string {
 
 	result := buf.String()
 	result = strings.Join(strings.Fields(result), " ")
-	if len(result) > 4000 {
-		result = result[:4000]
-	}
+	result = truncateRunesNoEllipsis(result, 4000)
 	return result
 }
 

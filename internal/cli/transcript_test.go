@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -119,6 +120,45 @@ func TestExtractLastPromptAndReply_TruncatesLongText(t *testing.T) {
 	require.True(t, strings.HasSuffix(user, "..."))
 	require.Len(t, reply, 53)
 	require.True(t, strings.HasPrefix(reply, strings.Repeat("b", 50)))
+}
+
+// TestExtractLastPromptAndReply_TruncatesChineseAsRunes verifies that a
+// long Chinese string is truncated on rune boundaries, never producing
+// invalid UTF-8. The old byte-based truncation `s[:50]` sliced through
+// the middle of 3-byte Chinese characters, causing mojibake in ntfy
+// notifications and sometimes making the ntfy client mis-detect the
+// message as an attachment.
+func TestExtractLastPromptAndReply_TruncatesChineseAsRunes(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "t.jsonl")
+	longPrompt := strings.Repeat("中", 200) // 600 bytes
+	longReply := strings.Repeat("答", 200)  // 600 bytes
+	writeLines(t, path,
+		`{"type":"user","message":{"role":"user","content":"`+longPrompt+`"}}`,
+		`{"type":"assistant","message":{"role":"assistant","content":"`+longReply+`"}}`,
+	)
+
+	user, reply, err := extractLastPromptAndReply(path)
+	require.NoError(t, err)
+
+	require.True(t, utf8.ValidString(user), "user prompt must be valid UTF-8 after truncation")
+	require.True(t, utf8.ValidString(reply), "assistant reply must be valid UTF-8 after truncation")
+
+	// 50 Chinese runes (50 * 3 = 150 bytes) + "..." (3 bytes) = 153 bytes,
+	// and 53 runes total.
+	require.Len(t, []rune(user), 53, "expected 50 runes + ellipsis")
+	require.Len(t, []rune(reply), 53)
+
+	require.True(t, strings.HasPrefix(user, strings.Repeat("中", 50)),
+		"user prompt should start with 50 Chinese characters, got %q", user)
+	require.True(t, strings.HasSuffix(user, "..."))
+	require.True(t, strings.HasPrefix(reply, strings.Repeat("答", 50)))
+	require.True(t, strings.HasSuffix(reply, "..."))
+
+	// Sanity check: byte length must be 153, NOT 50 — 50 bytes would mean
+	// we sliced through multi-byte characters (the old buggy behavior).
+	require.Len(t, user, 153)
+	require.Len(t, reply, 153)
 }
 
 func TestExtractLastPromptAndReply_StripsMarkdown(t *testing.T) {

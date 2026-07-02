@@ -80,8 +80,17 @@ func writeConfig(t *testing.T, configPath string) {
 	require.NoError(t, os.WriteFile(configPath, []byte(content), 0o600))
 }
 
+// isolateCache points the dedup store at a per-test temp dir so the
+// dedup feature can't bleed state across tests (or into the user's real
+// ~/.cache). Call at the top of any test that exercises send/stop.
+func isolateCache(t *testing.T) {
+	t.Helper()
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+}
+
 func TestStopCommand(t *testing.T) {
 	reg, fake := newFakeRegistry(t)
+	isolateCache(t)
 
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.toml")
@@ -137,6 +146,7 @@ func TestStopCommandInvalidJSON(t *testing.T) {
 
 func TestStopCommandEmptyCwdFallsBackToGetwd(t *testing.T) {
 	reg, fake := newFakeRegistry(t)
+	isolateCache(t)
 
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.toml")
@@ -167,6 +177,7 @@ func TestStopCommandEmptyCwdFallsBackToGetwd(t *testing.T) {
 
 func TestStopCommandIncludesLastPromptAndReply(t *testing.T) {
 	reg, fake := newFakeRegistry(t)
+	isolateCache(t)
 
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.toml")
@@ -201,6 +212,7 @@ func TestStopCommandIncludesLastPromptAndReply(t *testing.T) {
 
 func TestStopCommandFallsBackWhenTranscriptMissing(t *testing.T) {
 	reg, fake := newFakeRegistry(t)
+	isolateCache(t)
 
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.toml")
@@ -245,6 +257,7 @@ func runSend(t *testing.T, reg *notifier.Registry, configPath, payload string) {
 
 func TestSendActionIdlePromptAppendsPromptReply(t *testing.T) {
 	reg, fake := newFakeRegistry(t)
+	isolateCache(t)
 
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.toml")
@@ -268,6 +281,7 @@ func TestSendActionIdlePromptAppendsPromptReply(t *testing.T) {
 
 func TestSendActionOtherTypesDoNotModify(t *testing.T) {
 	reg, fake := newFakeRegistry(t)
+	isolateCache(t)
 
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.toml")
@@ -291,6 +305,7 @@ func TestSendActionOtherTypesDoNotModify(t *testing.T) {
 
 func TestSendActionIdlePromptWithoutTranscript(t *testing.T) {
 	reg, fake := newFakeRegistry(t)
+	isolateCache(t)
 
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.toml")

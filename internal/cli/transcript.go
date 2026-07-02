@@ -130,11 +130,10 @@ func firstTextBlock(content json.RawMessage) string {
 }
 
 // truncateForNotification strips markdown, collapses whitespace and
-// truncates to transcriptMaxTruncate characters.
+// truncates to transcriptMaxTruncate runes. It operates on runes rather
+// than bytes so multi-byte UTF-8 sequences (e.g. Chinese characters)
+// are never split, which would produce invalid UTF-8 output.
 func truncateForNotification(s string) string {
 	s = ntfyclient.StripMarkdown(s)
-	if len(s) > transcriptMaxTruncate {
-		s = s[:transcriptMaxTruncate] + "..."
-	}
-	return s
+	return ntfyclient.TruncateRunes(s, transcriptMaxTruncate)
 }
