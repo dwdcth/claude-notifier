@@ -4,7 +4,9 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 	"unicode/utf8"
 
 	"github.com/stretchr/testify/assert"
@@ -214,4 +216,63 @@ func TestBuildStopMessage_Both(t *testing.T) {
 	assert.Contains(t, msg, "💬 你: question")
 	assert.Contains(t, msg, "🤖 AI: answer")
 	assert.Contains(t, msg, "\n\n")
+}
+
+// TestExtractLastPromptAndReply_WaitsForAssistantFlush verifies the
+// race-condition guard: when the Stop hook fires before the
+// assistant's final reply is flushed to disk, the function should
+// retry and pick up the reply once it appears.
+//
+// We simulate the timing by writing only the user entry up front and
+// appending the assistant entry after a short delay; without the
+// retry the test would see an empty reply.
+func TestExtractLastPromptAndReply_WaitsForAssistantFlush(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "t.jsonl")
+	writeLines(t, path,
+		`{"type":"user","message":{"role":"user","content":"4+5=?"}}`,
+	)
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		time.Sleep(transcriptRaceInterval + 50*time.Millisecond)
+		// Append assistant reply. O_APPEND ensures the write is atomic
+		// with respect to the reader's bufio.Scan.
+		f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o600)
+		if err != nil {
+			return
+		}
+		defer func() { _ = f.Close() }()
+		_, _ = f.WriteString(`{"type":"assistant","message":{"role":"assistant","content":"9"}}` + "\n")
+	}()
+
+	user, reply, err := extractLastPromptAndReply(path)
+	wg.Wait()
+	require.NoError(t, err)
+	assert.Equal(t, "4+5=?", user)
+	assert.Equal(t, "9", reply, "should pick up assistant reply appended after first read")
+}
+
+// TestExtractLastPromptAndReply_GivesUpAfterRetries verifies that when
+// no assistant entry ever appears, the function still returns (with an
+// empty reply) instead of looping forever. We cap the wait well above
+// the maximum retry window (5 * 200ms = 1s) to keep the test fast
+// while still exercising the full retry loop.
+func TestExtractLastPromptAndReply_GivesUpAfterRetries(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "t.jsonl")
+	writeLines(t, path, `{"type":"user","message":{"role":"user","content":"stale"}}`)
+
+	start := time.Now()
+	user, reply, err := extractLastPromptAndReply(path)
+	elapsed := time.Since(start)
+	require.NoError(t, err)
+	assert.Equal(t, "stale", user)
+	assert.Equal(t, "", reply, "no assistant reply exists; should give up with empty string")
+
+	// Must have actually waited through the retry window. Be slightly
+	// lenient to avoid flakes on slow CI.
+	require.Greater(t, elapsed, 800*time.Millisecond, "expected ~1s of retries before giving up")
 }

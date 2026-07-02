@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/felipeelias/claude-notifier/internal/ntfyclient"
 )
@@ -18,6 +19,14 @@ const (
 	// line we are willing to parse. transcript.jsonl lines are usually
 	// small, but tool_result payloads can be large.
 	transcriptScannerMaxSize = 4 * 1024 * 1024
+	// transcriptRaceRetries is how many times we re-read the transcript
+	// when the last entry is a user message (meaning the assistant
+	// reply for the current turn has not been flushed yet). The Stop
+	// hook often fires before the final assistant entry hits disk.
+	transcriptRaceRetries = 5
+	// transcriptRaceInterval is the delay between race-condition
+	// retries. 5 retries * 200ms = up to 1s of total wait.
+	transcriptRaceInterval = 200 * time.Millisecond
 )
 
 // transcriptEntry is a single line of transcript.jsonl. We only care
@@ -49,10 +58,44 @@ type transcriptContentBlock struct {
 // (thinking/tool_use-only entries are skipped).
 //
 // Either value is "" if no matching entry is found.
+//
+// Race-condition guard: the Stop hook can fire before the assistant's
+// final reply is flushed to disk, leaving the last entry on disk as a
+// user message. When that happens we retry a few times so the
+// notification shows the actual current reply instead of the previous
+// turn's.
 func extractLastPromptAndReply(transcriptPath string) (userPrompt, assistantReply string, err error) {
+	var lastRole string
+	userPrompt, assistantReply, lastRole, err = readOnce(transcriptPath)
+	if err != nil {
+		return "", "", err
+	}
+
+	// If the last entry on disk is a user message, the assistant reply
+	// for this turn may still be in flight — wait and retry.
+	for i := 0; i < transcriptRaceRetries && lastRole == "user"; i++ {
+		time.Sleep(transcriptRaceInterval)
+		var retryLastRole string
+		var retryErr error
+		userPrompt, assistantReply, retryLastRole, retryErr = readOnce(transcriptPath)
+		if retryErr != nil {
+			return "", "", retryErr
+		}
+		lastRole = retryLastRole
+	}
+
+	userPrompt = truncateForNotification(userPrompt)
+	assistantReply = truncateForNotification(assistantReply)
+	return userPrompt, assistantReply, nil
+}
+
+// readOnce does a single pass over the transcript file. It returns the
+// last text-bearing user prompt, the last text-bearing assistant reply
+// and the role of the final parsed entry in the file ("" if empty).
+func readOnce(transcriptPath string) (userPrompt, assistantReply, lastRole string, err error) {
 	f, err := os.Open(transcriptPath)
 	if err != nil {
-		return "", "", fmt.Errorf("opening transcript: %w", err)
+		return "", "", "", fmt.Errorf("opening transcript: %w", err)
 	}
 	defer func() { _ = f.Close() }()
 
@@ -80,6 +123,11 @@ func extractLastPromptAndReply(transcriptPath string) (userPrompt, assistantRepl
 			continue
 		}
 
+		// Track the role of the most recent parseable entry regardless
+		// of whether it carries text — the caller uses this to detect
+		// a still-pending assistant reply.
+		lastRole = msg.Role
+
 		text := firstTextBlock(msg.Content)
 		if text == "" {
 			continue
@@ -94,12 +142,10 @@ func extractLastPromptAndReply(transcriptPath string) (userPrompt, assistantRepl
 	}
 
 	if err := scanner.Err(); err != nil {
-		return "", "", fmt.Errorf("reading transcript: %w", err)
+		return "", "", "", fmt.Errorf("reading transcript: %w", err)
 	}
 
-	userPrompt = truncateForNotification(userPrompt)
-	assistantReply = truncateForNotification(assistantReply)
-	return userPrompt, assistantReply, nil
+	return userPrompt, assistantReply, lastRole, nil
 }
 
 // firstTextBlock extracts the first text content from a transcript
