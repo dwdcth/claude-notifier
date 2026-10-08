@@ -3,8 +3,10 @@ version: 2
 builds:
   - main: .
     binary: claude-notifier
+    env:
+      - CGO_ENABLED=0
     ldflags:
-      - -s -w -X main.version={{.Version}}
+      - -s -w -trimpath -X main.version={{.Version}}
     goos:
       - linux
       - darwin
@@ -13,25 +15,8 @@ builds:
       - amd64
       - arm64
 
-nfpms:
-  - package_name: claude-notifier
-    homepage: https://github.com/felipeelias/claude-notifier
-    maintainer: Felipe Philipp <24556+felipeelias@users.noreply.github.com>
-    description: Notification dispatcher for Claude Code hooks
-    license: MIT
-    formats:
-      - deb
-      - rpm
-
-brews:
-  - name: claude-notifier
-    repository:
-      owner: felipeelias
-      name: homebrew-tap
-      token: "{{ .Env.TAP_GITHUB_TOKEN }}"
-    homepage: https://github.com/felipeelias/claude-notifier
-    description: Notification dispatcher for Claude Code hooks
-    license: MIT
+archives:
+  - formats: ["tar.gz"]
 
 checksum:
   name_template: checksums.txt
