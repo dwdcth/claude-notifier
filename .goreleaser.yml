@@ -5,8 +5,10 @@ builds:
     binary: claude-notifier
     env:
       - CGO_ENABLED=0
+    flags:
+      - -trimpath
     ldflags:
-      - -s -w -trimpath -X main.version={{.Version}}
+      - -s -w -X main.version={{.Version}}
     goos:
       - linux
       - darwin

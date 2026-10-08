@@ -9,3 +9,6 @@ globs:
 
 ignores:
   - "docs/plans/**"
+  - ".claude/**"
+  - ".trellis/**"
+  - ".spec-workflow/**"

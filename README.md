@@ -107,7 +107,7 @@ tags = "robot"
 
 ## 远程审批原理
 
-```
+```text
 Claude Code
   │
   │  PermissionRequest hook (stdin JSON)
@@ -141,7 +141,7 @@ Claude Code 继续或停止
 
 ---
 
-# Original README (English)
+## Original README (English)
 
 [![CI](https://github.com/felipeelias/claude-notifier/actions/workflows/ci.yml/badge.svg)](https://github.com/felipeelias/claude-notifier/actions/workflows/ci.yml)
 [![Go](https://img.shields.io/github/go-mod/go-version/felipeelias/claude-notifier)](https://github.com/felipeelias/claude-notifier/blob/main/go.mod)
@@ -241,6 +241,7 @@ claude-notifier setup
 ```
 
 This will:
+
 1. Generate a random ntfy topic name
 2. Save the approver configuration to your config file
 3. Register the `PermissionRequest` hook in `~/.claude/settings.json`
