@@ -1,4 +1,4 @@
-package ntfyclient
+package ntfyclient_test
 
 import (
 	"context"
@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/felipeelias/claude-notifier/internal/ntfyclient"
 )
 
 func TestPublish(t *testing.T) {
@@ -20,23 +22,23 @@ func TestPublish(t *testing.T) {
 		auth    string
 	}
 
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		received.title = r.Header.Get("Title")
-		received.actions = r.Header.Get("Actions")
-		received.auth = r.Header.Get("Authorization")
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, req *http.Request) {
+		received.title = req.Header.Get("Title")
+		received.actions = req.Header.Get("Actions")
+		received.auth = req.Header.Get("Authorization")
 		buf := make([]byte, 1024)
-		n, _ := r.Body.Read(buf)
+		n, _ := req.Body.Read(buf)
 		received.body = string(buf[:n])
-		w.WriteHeader(http.StatusOK)
+		writer.WriteHeader(http.StatusOK)
 	}))
 	defer server.Close()
 
-	_, err := Publish(context.Background(), PublishRequest{
+	_, err := ntfyclient.Publish(context.Background(), ntfyclient.PublishRequest{
 		Server:  server.URL,
 		Topic:   "test-topic",
 		Title:   "Test Title",
 		Message: "Hello World",
-		Auth:    AuthConfig{Token: "my-token"},
+		Auth:    ntfyclient.AuthConfig{Token: "my-token"},
 	})
 	if err != nil {
 		t.Fatalf("Publish() error: %v", err)
@@ -54,17 +56,17 @@ func TestPublish(t *testing.T) {
 
 func TestPublishWithBasicAuth(t *testing.T) {
 	var auth string
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		auth = r.Header.Get("Authorization")
-		w.WriteHeader(http.StatusOK)
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, req *http.Request) {
+		auth = req.Header.Get("Authorization")
+		writer.WriteHeader(http.StatusOK)
 	}))
 	defer server.Close()
 
-	_, err := Publish(context.Background(), PublishRequest{
+	_, err := ntfyclient.Publish(context.Background(), ntfyclient.PublishRequest{
 		Server:  server.URL,
 		Topic:   "test",
 		Message: "test",
-		Auth:    AuthConfig{Username: "user", Password: "pass"},
+		Auth:    ntfyclient.AuthConfig{Username: "user", Password: "pass"},
 	})
 	if err != nil {
 		t.Fatalf("error: %v", err)
@@ -76,17 +78,18 @@ func TestPublishWithBasicAuth(t *testing.T) {
 
 func TestPublishRetry(t *testing.T) {
 	calls := 0
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, req *http.Request) {
 		calls++
 		if calls < 3 {
-			w.WriteHeader(http.StatusInternalServerError)
+			writer.WriteHeader(http.StatusInternalServerError)
+
 			return
 		}
-		w.WriteHeader(http.StatusOK)
+		writer.WriteHeader(http.StatusOK)
 	}))
 	defer server.Close()
 
-	_, err := PublishWithRetry(context.Background(), PublishRequest{
+	_, err := ntfyclient.PublishWithRetry(context.Background(), ntfyclient.PublishRequest{
 		Server:  server.URL,
 		Topic:   "test",
 		Message: "retry test",
@@ -100,12 +103,12 @@ func TestPublishRetry(t *testing.T) {
 }
 
 func TestPublishRetryExhausted(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusInternalServerError)
+	server := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) {
+		rw.WriteHeader(http.StatusInternalServerError)
 	}))
 	defer server.Close()
 
-	_, err := PublishWithRetry(context.Background(), PublishRequest{
+	_, err := ntfyclient.PublishWithRetry(context.Background(), ntfyclient.PublishRequest{
 		Server:  server.URL,
 		Topic:   "test",
 		Message: "fail",
@@ -122,15 +125,18 @@ func TestWaitForResponse(t *testing.T) {
 	requestID := "test-req-123"
 	// ntfy SSE /json returns message as a JSON string literal (escaped JSON inside string)
 	body := fmt.Sprintf(`{"requestId":"%s","decision":"approve"}`, requestID)
-	responseJSON := fmt.Sprintf(`{"id":"1","event":"message","topic":"test-topic-response","message":%s}`, strconv.Quote(body))
+	responseJSON := fmt.Sprintf(
+		`{"id":"1","event":"message","topic":"test-topic-response","message":%s}`, strconv.Quote(body))
 
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(responseJSON + "\n"))
+	server := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) {
+		rw.WriteHeader(http.StatusOK)
+		// The write result does not matter to this test.
+		_, _ = rw.Write([]byte(responseJSON + "\n"))
 	}))
 	defer server.Close()
 
-	resp, err := WaitForResponse(context.Background(), server.URL, "test-topic", requestID, AuthConfig{})
+	resp, err := ntfyclient.WaitForResponse(context.Background(), server.URL,
+		"test-topic", requestID, ntfyclient.AuthConfig{})
 	if err != nil {
 		t.Fatalf("error: %v", err)
 	}
@@ -153,15 +159,17 @@ func TestWaitForResponseSkipsUnmatched(t *testing.T) {
 		mkLine("3", "message", fmt.Sprintf(`{"requestId":"%s","decision":"approve"}`, targetID)),
 	}
 
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
+	server := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) {
+		rw.WriteHeader(http.StatusOK)
 		for _, line := range lines {
-			w.Write([]byte(line + "\n"))
+			// The write result does not matter to this test.
+			_, _ = rw.Write([]byte(line + "\n"))
 		}
 	}))
 	defer server.Close()
 
-	resp, err := WaitForResponse(context.Background(), server.URL, "test-topic", targetID, AuthConfig{})
+	resp, err := ntfyclient.WaitForResponse(context.Background(), server.URL,
+		"test-topic", targetID, ntfyclient.AuthConfig{})
 	if err != nil {
 		t.Fatalf("error: %v", err)
 	}
@@ -172,10 +180,11 @@ func TestWaitForResponseSkipsUnmatched(t *testing.T) {
 
 func TestWaitForResponseContextCancel(t *testing.T) {
 	done := make(chan struct{})
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		w.Write([]byte("\n")) // send one empty line so scanner doesn't block on first read
-		<-done                // block until test is done
+	server := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) {
+		rw.WriteHeader(http.StatusOK)
+		// The write result does not matter to this test.
+		_, _ = rw.Write([]byte("\n")) // send one empty line so scanner doesn't block on first read
+		<-done                        // block until test is done
 	}))
 	defer server.Close()
 	defer close(done)
@@ -183,60 +192,63 @@ func TestWaitForResponseContextCancel(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
 
-	_, err := WaitForResponse(ctx, server.URL, "test-topic", "req", AuthConfig{})
+	_, err := ntfyclient.WaitForResponse(ctx, server.URL, "test-topic", "req", ntfyclient.AuthConfig{})
 	if err == nil {
 		t.Fatal("expected error")
 	}
 }
 
 func TestBuildApprovalURL(t *testing.T) {
-	url := BuildApprovalURL("https://ntfy.sh", "my-topic", "req-123", "approve")
+	url := ntfyclient.BuildApprovalURL("https://ntfy.sh", "my-topic", "req-123", "approve")
 	want := "https://ntfy.sh/my-topic-response"
 	if url != want {
 		t.Errorf("got %q, want %q", url, want)
 	}
 }
 
+// assertApprovalAction checks that an approval action carries the expected
+// label and decision payload.
+func assertApprovalAction(t *testing.T, action ntfyclient.Action, wantLabel, wantDecision string) {
+	t.Helper()
+
+	if action.Label != wantLabel {
+		t.Errorf("action Label = %q, want %q", action.Label, wantLabel)
+	}
+	if !strings.Contains(action.Body, `"decision":"`+wantDecision+`"`) {
+		t.Errorf("action %q Body = %s, want decision %q", action.Label, action.Body, wantDecision)
+	}
+}
+
 func TestBuildApprovalActions(t *testing.T) {
-	actions := BuildApprovalActions("https://ntfy.sh", "topic", "req1", false, nil)
+	actions := ntfyclient.BuildApprovalActions("https://ntfy.sh", "topic", "req1", false, nil)
 	if len(actions) != 2 {
 		t.Fatalf("expected 2 actions, got %d", len(actions))
 	}
-	if actions[0].Label != "Approve" {
-		t.Errorf("action[0].Label = %q", actions[0].Label)
-	}
-	if actions[1].Label != "Deny" {
-		t.Errorf("action[1].Label = %q", actions[1].Label)
-	}
-	for _, a := range actions {
-		if a.Method != "POST" {
-			t.Errorf("action %q Method = %q, want POST", a.Label, a.Method)
+
+	assertApprovalAction(t, actions[0], "Approve", "approve")
+	assertApprovalAction(t, actions[1], "Deny", "deny")
+
+	for _, action := range actions {
+		if action.Method != http.MethodPost {
+			t.Errorf("action %q Method = %q, want %s", action.Label, action.Method, http.MethodPost)
 		}
-		if a.URL != "https://ntfy.sh/topic-response" {
-			t.Errorf("action %q URL = %q, want https://ntfy.sh/topic-response", a.Label, a.URL)
+		if action.URL != "https://ntfy.sh/topic-response" {
+			t.Errorf("action %q URL = %q, want https://ntfy.sh/topic-response", action.Label, action.URL)
 		}
-		if !strings.Contains(a.Body, `"requestId":"req1"`) {
-			t.Errorf("action %q Body missing requestId: %s", a.Label, a.Body)
+		if !strings.Contains(action.Body, `"requestId":"req1"`) {
+			t.Errorf("action %q Body missing requestId: %s", action.Label, action.Body)
 		}
 	}
-	if !strings.Contains(actions[0].Body, `"decision":"approve"`) {
-		t.Errorf("Approve Body = %s", actions[0].Body)
-	}
-	if !strings.Contains(actions[1].Body, `"decision":"deny"`) {
-		t.Errorf("Deny Body = %s", actions[1].Body)
+}
+
+func TestBuildApprovalActionsWithAlwaysApprove(t *testing.T) {
+	actions := ntfyclient.BuildApprovalActions("https://ntfy.sh", "topic", "req1", true,
+		[]map[string]any{{"type": "toolAlwaysAllow", "tool": "Bash"}})
+	if len(actions) != 3 {
+		t.Fatalf("expected 3 actions with always approve, got %d", len(actions))
 	}
 
-	actionsWithAlways := BuildApprovalActions("https://ntfy.sh", "topic", "req1", true,
-		[]map[string]interface{}{{"type": "toolAlwaysAllow", "tool": "Bash"}})
-	if len(actionsWithAlways) != 3 {
-		t.Fatalf("expected 3 actions with always approve, got %d", len(actionsWithAlways))
-	}
-	if actionsWithAlways[2].Label != "Always Approve" {
-		t.Errorf("action[2].Label = %q", actionsWithAlways[2].Label)
-	}
-	if !strings.Contains(actionsWithAlways[2].Body, `"decision":"always_approve"`) {
-		t.Errorf("Always Approve Body = %s", actionsWithAlways[2].Body)
-	}
+	assertApprovalAction(t, actions[2], "Always Approve", "always_approve")
 }
 
 func TestStripMarkdown(t *testing.T) {
@@ -287,7 +299,7 @@ func TestStripMarkdown(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		got := StripMarkdown(tt.input)
+		got := ntfyclient.StripMarkdown(tt.input)
 		if strings.TrimSpace(got) != strings.TrimSpace(tt.want) {
 			t.Errorf("StripMarkdown(%q) = %q, want %q", tt.input, got, tt.want)
 		}
@@ -295,10 +307,10 @@ func TestStripMarkdown(t *testing.T) {
 }
 
 func TestActionsHeader(t *testing.T) {
-	actions := []Action{
+	actions := []ntfyclient.Action{
 		{Action: "http", Label: "Approve", URL: "https://example.com/approve", Clear: true},
 	}
-	header, err := actionsHeader(actions)
+	header, err := ntfyclient.ActionsHeader(actions)
 	if err != nil {
 		t.Fatalf("error: %v", err)
 	}
@@ -315,20 +327,20 @@ func TestTopicURL(t *testing.T) {
 		{"https://ntfy.sh/", "my-topic", "https://ntfy.sh/my-topic"},
 	}
 	for _, tt := range tests {
-		got := topicURL(tt.server, tt.topic)
+		got := ntfyclient.TopicURL(tt.server, tt.topic)
 		if got != tt.want {
-			t.Errorf("topicURL(%q, %q) = %q, want %q", tt.server, tt.topic, got, tt.want)
+			t.Errorf("TopicURL(%q, %q) = %q, want %q", tt.server, tt.topic, got, tt.want)
 		}
 	}
 }
 
 func TestPublishServerError(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusServiceUnavailable)
+	server := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) {
+		rw.WriteHeader(http.StatusServiceUnavailable)
 	}))
 	defer server.Close()
 
-	_, err := Publish(context.Background(), PublishRequest{
+	_, err := ntfyclient.Publish(context.Background(), ntfyclient.PublishRequest{
 		Server:  server.URL,
 		Topic:   "test",
 		Message: "fail",
@@ -342,13 +354,14 @@ func TestPublishServerError(t *testing.T) {
 }
 
 func TestWaitForResponseServerError(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusUnauthorized)
-		w.Write([]byte("unauthorized"))
+	server := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) {
+		rw.WriteHeader(http.StatusUnauthorized)
+		// The write result does not matter to this test.
+		_, _ = rw.Write([]byte("unauthorized"))
 	}))
 	defer server.Close()
 
-	_, err := WaitForResponse(context.Background(), server.URL, "topic", "req", AuthConfig{})
+	_, err := ntfyclient.WaitForResponse(context.Background(), server.URL, "topic", "req", ntfyclient.AuthConfig{})
 	if err == nil {
 		t.Fatal("expected error")
 	}
@@ -359,18 +372,18 @@ func TestWaitForResponseServerError(t *testing.T) {
 
 func TestPublishWithActions(t *testing.T) {
 	var actionsHdr string
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		actionsHdr = r.Header.Get("Actions")
-		w.WriteHeader(http.StatusOK)
+	server := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) {
+		actionsHdr = req.Header.Get("Actions")
+		rw.WriteHeader(http.StatusOK)
 	}))
 	defer server.Close()
 
-	_, err := Publish(context.Background(), PublishRequest{
+	_, err := ntfyclient.Publish(context.Background(), ntfyclient.PublishRequest{
 		Server:  server.URL,
 		Topic:   "test",
 		Title:   "Approval",
 		Message: "Allow Bash?",
-		Actions: []Action{
+		Actions: []ntfyclient.Action{
 			{Action: "http", Label: "Approve", URL: "https://e.com/a", Clear: true},
 			{Action: "http", Label: "Deny", URL: "https://e.com/d", Clear: true},
 		},
@@ -379,8 +392,9 @@ func TestPublishWithActions(t *testing.T) {
 		t.Fatalf("error: %v", err)
 	}
 
-	var parsed []map[string]interface{}
-	if err := json.Unmarshal([]byte(actionsHdr), &parsed); err != nil {
+	var parsed []map[string]any
+	err = json.Unmarshal([]byte(actionsHdr), &parsed)
+	if err != nil {
 		t.Fatalf("parse actions header: %v (header=%s)", err, actionsHdr)
 	}
 	if len(parsed) != 2 {
@@ -392,13 +406,14 @@ func TestPublishWithActions(t *testing.T) {
 }
 
 func TestPublishReturnsMessageID(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(`{"id":"msg-abc123","time":1234567890,"event":"message"}`))
+	server := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) {
+		rw.WriteHeader(http.StatusOK)
+		// The write result does not matter to this test.
+		_, _ = rw.Write([]byte(`{"id":"msg-abc123","time":1234567890,"event":"message"}`))
 	}))
 	defer server.Close()
 
-	msgID, err := Publish(context.Background(), PublishRequest{
+	msgID, err := ntfyclient.Publish(context.Background(), ntfyclient.PublishRequest{
 		Server:  server.URL,
 		Topic:   "test",
 		Message: "hello",
@@ -412,13 +427,13 @@ func TestPublishReturnsMessageID(t *testing.T) {
 }
 
 func TestPublishReturnsEmptyIDOnUnparseableResponse(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
+	server := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) {
+		rw.WriteHeader(http.StatusOK)
 		// No JSON body
 	}))
 	defer server.Close()
 
-	msgID, err := Publish(context.Background(), PublishRequest{
+	msgID, err := ntfyclient.Publish(context.Background(), ntfyclient.PublishRequest{
 		Server:  server.URL,
 		Topic:   "test",
 		Message: "hello",
@@ -434,14 +449,15 @@ func TestPublishReturnsEmptyIDOnUnparseableResponse(t *testing.T) {
 func TestDeleteNotification(t *testing.T) {
 	var method string
 	var path string
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		method = r.Method
-		path = r.URL.Path
-		w.WriteHeader(http.StatusOK)
+	server := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) {
+		method = req.Method
+		path = req.URL.Path
+		rw.WriteHeader(http.StatusOK)
 	}))
 	defer server.Close()
 
-	err := DeleteNotification(context.Background(), server.URL, "test-topic", "msg-123", AuthConfig{Token: "tok"})
+	err := ntfyclient.DeleteNotification(context.Background(), server.URL, "test-topic", "msg-123",
+		ntfyclient.AuthConfig{Token: "tok"})
 	if err != nil {
 		t.Fatalf("error: %v", err)
 	}
@@ -454,19 +470,19 @@ func TestDeleteNotification(t *testing.T) {
 }
 
 func TestDeleteNotificationEmptyID(t *testing.T) {
-	err := DeleteNotification(context.Background(), "https://ntfy.sh", "topic", "", AuthConfig{})
+	err := ntfyclient.DeleteNotification(context.Background(), "https://ntfy.sh", "topic", "", ntfyclient.AuthConfig{})
 	if err != nil {
 		t.Fatalf("expected nil error for empty ID, got: %v", err)
 	}
 }
 
 func TestDeleteNotificationServerError(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusNotFound)
+	server := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) {
+		rw.WriteHeader(http.StatusNotFound)
 	}))
 	defer server.Close()
 
-	err := DeleteNotification(context.Background(), server.URL, "topic", "msg-123", AuthConfig{})
+	err := ntfyclient.DeleteNotification(context.Background(), server.URL, "topic", "msg-123", ntfyclient.AuthConfig{})
 	if err == nil {
 		t.Fatal("expected error")
 	}

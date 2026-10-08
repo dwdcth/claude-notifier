@@ -154,7 +154,7 @@ url = "https://ntfy.sh/test"
 	cfg2, err := config.Load(path)
 	require.NoError(t, err)
 
-	assert.Equal(t, "", cfg2.Approver.Topic, "approver should be cleared")
+	assert.Empty(t, cfg2.Approver.Topic, "approver should be cleared")
 	assert.Equal(t, 10*time.Second, cfg2.Global.Timeout, "global should be preserved")
 	require.Len(t, cfg2.Notifiers["ntfy"], 1, "ntfy notifier should survive approver clear")
 

@@ -6,12 +6,32 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"strings"
 	"time"
+)
+
+const (
+	// httpTimeout bounds ordinary publish and delete HTTP requests.
+	httpTimeout = 30 * time.Second
+
+	// sseErrorBodyReadLimit caps how much of the error response body is
+	// read when the SSE endpoint replies with an HTTP error status.
+	sseErrorBodyReadLimit = 512
+
+	// sseInitialBufferSize is the initial scan buffer for SSE lines.
+	sseInitialBufferSize = 64 * 1024
+
+	// sseMaxBufferSize caps a single SSE line; notification payloads can
+	// exceed bufio's 64 KiB default limit.
+	sseMaxBufferSize = 1024 * 1024
+
+	// stripMarkdownMaxRunes caps the plain-text output of StripMarkdown.
+	stripMarkdownMaxRunes = 4000
 )
 
 type Action struct {
@@ -40,7 +60,10 @@ type AuthConfig struct {
 }
 
 type Response struct {
-	RequestID string `json:"requestId"`
+	// RequestID keeps a camelCase JSON key: it is the wire format of the
+	// approval action bodies, which internal/approver also builds by hand
+	// with the same key, so it cannot be renamed here unilaterally.
+	RequestID string `json:"requestId"` //nolint:tagliatelle // camelCase wire format shared with internal/approver.
 	Decision  string `json:"decision"`
 	Answer    string `json:"answer"`
 }
@@ -52,12 +75,13 @@ type SSEMessage struct {
 }
 
 var httpClient = &http.Client{
-	Timeout: 30 * time.Second,
+	Timeout: httpTimeout,
 }
 
 var sseClient = &http.Client{}
 
-func topicURL(server, topic string) string {
+// TopicURL joins a ntfy server base URL and a topic into the topic endpoint URL.
+func TopicURL(server, topic string) string {
 	return strings.TrimRight(server, "/") + "/" + topic
 }
 
@@ -70,14 +94,18 @@ func setAuth(req *http.Request, auth AuthConfig) {
 	}
 }
 
-func actionsHeader(actions []Action) (string, error) {
+// ActionsHeader serializes approval actions into the value of the ntfy
+// "Actions" HTTP header.
+func ActionsHeader(actions []Action) (string, error) {
 	if len(actions) == 0 {
 		return "", nil
 	}
+
 	b, err := json.Marshal(actions)
 	if err != nil {
 		return "", fmt.Errorf("marshaling actions: %w", err)
 	}
+
 	return string(b), nil
 }
 
@@ -87,13 +115,13 @@ type ntfyPublishResponse struct {
 }
 
 func Publish(ctx context.Context, req PublishRequest) (string, error) {
-	actions, err := actionsHeader(req.Actions)
+	actions, err := ActionsHeader(req.Actions)
 	if err != nil {
 		return "", fmt.Errorf("building actions: %w", err)
 	}
 
 	body := req.Message
-	url := topicURL(req.Server, req.Topic)
+	url := TopicURL(req.Server, req.Topic)
 
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, strings.NewReader(body))
 	if err != nil {
@@ -118,12 +146,13 @@ func Publish(ctx context.Context, req PublishRequest) (string, error) {
 		_ = resp.Body.Close()
 	}()
 
-	if resp.StatusCode >= 400 {
+	if resp.StatusCode >= http.StatusBadRequest {
 		return "", fmt.Errorf("server returned %s", resp.Status)
 	}
 
 	var publishResp ntfyPublishResponse
-	if err := json.NewDecoder(resp.Body).Decode(&publishResp); err != nil {
+	err = json.NewDecoder(resp.Body).Decode(&publishResp)
+	if err != nil {
 		// If we can't parse the response, return empty ID but no error.
 		// The message was still published successfully.
 		return "", nil
@@ -143,6 +172,7 @@ func PublishWithRetry(ctx context.Context, req PublishRequest, maxAttempts int) 
 		if msgID != "" {
 			lastMsgID = msgID
 		}
+
 		lastErr = err
 		slog.Warn("publish attempt failed", "attempt", attempt, "error", err)
 		if attempt < maxAttempts {
@@ -153,12 +183,13 @@ func PublishWithRetry(ctx context.Context, req PublishRequest, maxAttempts int) 
 			}
 		}
 	}
+
 	return lastMsgID, fmt.Errorf("all %d attempts failed: %w", maxAttempts, lastErr)
 }
 
 func WaitForResponse(ctx context.Context, server, topic, requestID string, auth AuthConfig) (*Response, error) {
 	responseTopic := topic + "-response"
-	url := topicURL(server, responseTopic) + "/json"
+	url := TopicURL(server, responseTopic) + "/json"
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
@@ -174,13 +205,14 @@ func WaitForResponse(ctx context.Context, server, topic, requestID string, auth 
 		_ = resp.Body.Close()
 	}()
 
-	if resp.StatusCode >= 400 {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+	if resp.StatusCode >= http.StatusBadRequest {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, sseErrorBodyReadLimit))
+
 		return nil, fmt.Errorf("SSE returned %s: %s", resp.Status, string(body))
 	}
 
 	scanner := bufio.NewScanner(resp.Body)
-	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	scanner.Buffer(make([]byte, 0, sseInitialBufferSize), sseMaxBufferSize)
 
 	for scanner.Scan() {
 		line := scanner.Text()
@@ -188,38 +220,59 @@ func WaitForResponse(ctx context.Context, server, topic, requestID string, auth 
 			continue
 		}
 
-		var msg SSEMessage
-		if err := json.Unmarshal([]byte(line), &msg); err != nil {
-			slog.Debug("skipping non-JSON SSE line", "line", line)
-			continue
-		}
-
-		if msg.Event != "message" {
-			continue
-		}
-
-		var body string
-		if err := json.Unmarshal(msg.Message, &body); err != nil {
-			slog.Debug("skipping non-string message body", "error", err)
-			continue
-		}
-
-		var response Response
-		if err := json.Unmarshal([]byte(body), &response); err != nil {
-			slog.Debug("skipping unparseable message", "error", err)
+		response := decodeSSEResponse(line)
+		if response == nil {
 			continue
 		}
 
 		if response.RequestID == requestID {
-			return &response, nil
+			return response, nil
 		}
 	}
 
-	if err := scanner.Err(); err != nil {
+	err = scanner.Err()
+	if err != nil {
 		return nil, fmt.Errorf("reading SSE stream: %w", err)
 	}
 
-	return nil, fmt.Errorf("SSE stream ended without matching response")
+	return nil, errors.New("SSE stream ended without matching response")
+}
+
+// decodeSSEResponse decodes a single ntfy /json SSE line into a Response.
+// It returns nil for lines that are not "message" events carrying a valid
+// Response payload; such lines are skipped so the stream keeps draining.
+func decodeSSEResponse(line string) *Response {
+	var msg SSEMessage
+	err := json.Unmarshal([]byte(line), &msg)
+	if err != nil {
+		// The raw line is untrusted network input; do not log its contents
+		// to avoid log injection.
+		slog.Debug("skipping non-JSON SSE line")
+
+		return nil
+	}
+
+	if msg.Event != "message" {
+		return nil
+	}
+
+	var body string
+	err = json.Unmarshal(msg.Message, &body)
+	if err != nil {
+		slog.Debug("skipping non-string message body", "error", err)
+
+		return nil
+	}
+
+	var response Response
+	err = json.Unmarshal([]byte(body), &response)
+	if err != nil {
+		slog.Debug("skipping unparseable message", "error", err)
+
+		return nil
+	}
+
+	return &response
 }
 
 // DeleteNotification deletes a cached notification from the ntfy server.
@@ -229,7 +282,7 @@ func DeleteNotification(ctx context.Context, server, topic, messageID string, au
 		return nil
 	}
 
-	url := topicURL(server, topic) + "/" + messageID
+	url := TopicURL(server, topic) + "/" + messageID
 	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, url, nil)
 	if err != nil {
 		return fmt.Errorf("creating delete request: %w", err)
@@ -245,7 +298,7 @@ func DeleteNotification(ctx context.Context, server, topic, messageID string, au
 		_ = resp.Body.Close()
 	}()
 
-	if resp.StatusCode >= 400 {
+	if resp.StatusCode >= http.StatusBadRequest {
 		return fmt.Errorf("delete returned %s", resp.Status)
 	}
 
@@ -254,12 +307,23 @@ func DeleteNotification(ctx context.Context, server, topic, messageID string, au
 
 func BuildApprovalURL(server, topic, requestID, decision string) string {
 	responseTopic := topic + "-response"
+
 	return strings.TrimRight(server, "/") + "/" + responseTopic
 }
 
-func BuildApprovalActions(server, topic, requestID string, withAlwaysApprove bool, permissionSuggestions []map[string]interface{}) []Action {
+func BuildApprovalActions(
+	server, topic, requestID string,
+	withAlwaysApprove bool,
+	permissionSuggestions []map[string]any,
+) []Action {
 	makeAction := func(label, decision string) Action {
-		body, _ := json.Marshal(Response{RequestID: requestID, Decision: decision})
+		body, err := json.Marshal(Response{RequestID: requestID, Decision: decision})
+		if err != nil {
+			// Unreachable in practice: Response holds only string fields.
+			// The error is checked so encoding failures stay visible.
+			slog.Debug("marshaling approval response body", "error", err)
+		}
+
 		return Action{
 			Action: "http",
 			Label:  label,
@@ -282,28 +346,30 @@ func BuildApprovalActions(server, topic, requestID string, withAlwaysApprove boo
 	return actions
 }
 
-// TruncateRunes truncates s to at most max runes, appending "..." if
+// TruncateRunes truncates text to at most maxRunes runes, appending "..." if
 // truncation occurred. It operates on runes rather than bytes so that
 // multi-byte UTF-8 sequences (e.g. Chinese characters) are never split
 // in half, which would produce invalid UTF-8 and confuse downstream
 // consumers (some ntfy clients mis-detect invalid UTF-8 as an attachment).
-func TruncateRunes(s string, max int) string {
-	runes := []rune(s)
-	if len(runes) > max {
-		return string(runes[:max]) + "..."
+func TruncateRunes(text string, maxRunes int) string {
+	runes := []rune(text)
+	if len(runes) > maxRunes {
+		return string(runes[:maxRunes]) + "..."
 	}
-	return s
+
+	return text
 }
 
-// truncateRunesNoEllipsis is like TruncateRunes but does not append the
+// TruncateRunesNoEllipsis is like TruncateRunes but does not append the
 // trailing "...". Used by callers that already impose a hard size limit
 // and cannot afford the extra bytes (e.g. StripMarkdown's 4000-rune cap).
-func truncateRunesNoEllipsis(s string, max int) string {
-	runes := []rune(s)
-	if len(runes) > max {
-		return string(runes[:max])
+func TruncateRunesNoEllipsis(text string, maxRunes int) string {
+	runes := []rune(text)
+	if len(runes) > maxRunes {
+		return string(runes[:maxRunes])
 	}
-	return s
+
+	return text
 }
 
 func StripMarkdown(input string) string {
@@ -315,10 +381,12 @@ func StripMarkdown(input string) string {
 		trimmed := strings.TrimSpace(line)
 		if strings.HasPrefix(trimmed, "```") {
 			inCodeBlock = !inCodeBlock
+
 			continue
 		}
 		if inCodeBlock {
 			buf.WriteString(line + "\n")
+
 			continue
 		}
 		if strings.HasPrefix(trimmed, "---") && len(trimmed) >= 3 {
@@ -344,66 +412,81 @@ func StripMarkdown(input string) string {
 
 	result := buf.String()
 	result = strings.Join(strings.Fields(result), " ")
-	result = truncateRunesNoEllipsis(result, 4000)
+	result = TruncateRunesNoEllipsis(result, stripMarkdownMaxRunes)
+
 	return result
 }
 
-func stripLinks(s string) string {
+func stripLinks(text string) string {
 	for {
-		start := strings.Index(s, "[")
+		start := strings.Index(text, "[")
 		if start == -1 {
 			break
 		}
-		end := strings.Index(s[start:], "](")
+
+		end := strings.Index(text[start:], "](")
 		if end == -1 {
 			break
 		}
+
 		end += start
-		closeParen := strings.Index(s[end:], ")")
+		closeParen := strings.Index(text[end:], ")")
 		if closeParen == -1 {
 			break
 		}
+
 		closeParen += end
-		text := s[start+1 : end]
-		s = s[:start] + text + s[closeParen+1:]
+		linkText := text[start+1 : end]
+		text = text[:start] + linkText + text[closeParen+1:]
 	}
-	return s
+
+	return text
 }
 
-func stripBold(s string) string {
+func stripBold(text string) string {
+	const marker = "**"
+
 	for {
-		i := strings.Index(s, "**")
-		if i == -1 {
+		start := strings.Index(text, marker)
+		if start == -1 {
 			break
 		}
-		j := strings.Index(s[i+2:], "**")
-		if j == -1 {
+
+		end := strings.Index(text[start+len(marker):], marker)
+		if end == -1 {
 			break
 		}
-		j += i + 2
-		text := s[i+2 : j]
-		s = s[:i] + text + s[j+2:]
+
+		end += start + len(marker)
+		boldText := text[start+len(marker) : end]
+		text = text[:start] + boldText + text[end+len(marker):]
 	}
-	return s
+
+	return text
 }
 
-func stripItalic(s string) string {
+func stripItalic(text string) string {
 	for {
-		i := strings.Index(s, "*")
-		if i == -1 {
+		start := strings.Index(text, "*")
+		if start == -1 {
 			break
 		}
-		if i > 0 && s[i-1] == '*' {
-			s = s[:i] + s[i+1:]
+
+		if start > 0 && text[start-1] == '*' {
+			text = text[:start] + text[start+1:]
+
 			continue
 		}
-		j := strings.Index(s[i+1:], "*")
-		if j == -1 {
+
+		end := strings.Index(text[start+1:], "*")
+		if end == -1 {
 			break
 		}
-		j += i + 1
-		text := s[i+1 : j]
-		s = s[:i] + text + s[j+1:]
+
+		end += start + 1
+		italicText := text[start+1 : end]
+		text = text[:start] + italicText + text[end+1:]
 	}
-	return s
+
+	return text
 }

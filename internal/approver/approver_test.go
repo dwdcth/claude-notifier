@@ -1,4 +1,4 @@
-package approver
+package approver_test
 
 import (
 	"context"
@@ -10,14 +10,22 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/felipeelias/claude-notifier/internal/approver"
 )
 
 const testRequestID = "test-req-fixed-12345"
 
 func fixedID() string { return testRequestID }
 
+// writeBody writes a handler response body, ignoring the write error: an
+// httptest handler has no meaningful way to report a failed write.
+func writeBody(responseWriter http.ResponseWriter, body string) {
+	_, _ = responseWriter.Write([]byte(body))
+}
+
 func TestAskOutput(t *testing.T) {
-	out := AskOutput()
+	out := approver.AskOutput()
 	if !strings.Contains(string(out), `"hookEventName":"PermissionRequest"`) {
 		t.Errorf("expected PermissionRequest in output: %s", out)
 	}
@@ -27,54 +35,56 @@ func TestAskOutput(t *testing.T) {
 }
 
 func TestApproveOutput(t *testing.T) {
-	out := ApproveOutput()
+	out := approver.ApproveOutput()
 	if !strings.Contains(string(out), `"behavior":"allow"`) {
 		t.Errorf("expected allow in output: %s", out)
 	}
 }
 
 func TestDenyOutput(t *testing.T) {
-	out := DenyOutput()
+	out := approver.DenyOutput()
 	if !strings.Contains(string(out), `"behavior":"deny"`) {
 		t.Errorf("expected deny in output: %s", out)
 	}
 }
 
 func TestAlwaysApproveOutput(t *testing.T) {
-	suggestions := []map[string]interface{}{
+	suggestions := []map[string]any{
 		{"type": "toolAlwaysAllow", "tool": "Bash"},
 	}
-	out := AlwaysApproveOutput(suggestions)
-	s := string(out)
-	if !strings.Contains(s, `"behavior":"allow"`) {
-		t.Errorf("expected allow: %s", s)
+	out := approver.AlwaysApproveOutput(suggestions)
+	output := string(out)
+	if !strings.Contains(output, `"behavior":"allow"`) {
+		t.Errorf("expected allow: %s", output)
 	}
-	if !strings.Contains(s, `"toolAlwaysAllow"`) {
-		t.Errorf("expected updatedPermissions: %s", s)
+	if !strings.Contains(output, `"toolAlwaysAllow"`) {
+		t.Errorf("expected updatedPermissions: %s", output)
 	}
 }
 
 func TestProcessHookNoTopic(t *testing.T) {
-	req := PermissionRequest{
+	req := approver.PermissionRequest{
 		HookEventName: "PreToolUse",
 		ToolName:      "Bash",
 		ToolInput:     json.RawMessage(`{"command":"ls"}`),
 	}
-	out := ProcessHook(context.Background(), req, ApproverConfig{})
+	out := approver.ProcessHook(context.Background(), req, approver.ApproverConfig{})
 	if !strings.Contains(string(out), `"hookEventName":"PermissionRequest"`) {
 		t.Errorf("expected ask fallback: %s", out)
 	}
 }
 
 func newTestServer(decision string) *httptest.Server {
-	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodDelete {
-			w.WriteHeader(http.StatusOK)
+	return httptest.NewServer(http.HandlerFunc(func(responseWriter http.ResponseWriter, request *http.Request) {
+		if request.Method == http.MethodDelete {
+			responseWriter.WriteHeader(http.StatusOK)
+
 			return
 		}
-		if r.Method == http.MethodPost {
-			w.WriteHeader(http.StatusOK)
-			w.Write([]byte(`{"id":"test-msg-id"}`))
+		if request.Method == http.MethodPost {
+			responseWriter.WriteHeader(http.StatusOK)
+			writeBody(responseWriter, `{"id":"test-msg-id"}`)
+
 			return
 		}
 		// ntfy SSE /json returns message as a JSON string literal
@@ -82,8 +92,8 @@ func newTestServer(decision string) *httptest.Server {
 		resp := fmt.Sprintf(
 			`{"id":"1","event":"message","message":%s}`,
 			strconv.Quote(inner))
-		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(resp + "\n"))
+		responseWriter.WriteHeader(http.StatusOK)
+		writeBody(responseWriter, resp+"\n")
 	}))
 }
 
@@ -91,13 +101,13 @@ func TestProcessHookApprove(t *testing.T) {
 	server := newTestServer("approve")
 	defer server.Close()
 
-	req := PermissionRequest{
+	req := approver.PermissionRequest{
 		HookEventName: "PreToolUse",
 		ToolName:      "Bash",
 		ToolInput:     json.RawMessage(`{"command":"ls -la"}`),
 	}
 
-	out := ProcessHook(context.Background(), req, ApproverConfig{
+	out := approver.ProcessHook(context.Background(), req, approver.ApproverConfig{
 		Server:     server.URL,
 		Topic:      "test-topic",
 		Timeout:    5 * time.Second,
@@ -111,31 +121,33 @@ func TestProcessHookApprove(t *testing.T) {
 
 func TestProcessHookWithSuggestions(t *testing.T) {
 	var gotActions string
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodPost {
-			gotActions = r.Header.Get("Actions")
-			w.WriteHeader(http.StatusOK)
-			w.Write([]byte(`{"id":"test-msg-id"}`))
+	server := httptest.NewServer(http.HandlerFunc(func(responseWriter http.ResponseWriter, request *http.Request) {
+		if request.Method == http.MethodPost {
+			gotActions = request.Header.Get("Actions")
+			responseWriter.WriteHeader(http.StatusOK)
+			writeBody(responseWriter, `{"id":"test-msg-id"}`)
+
 			return
 		}
-		if r.Method == http.MethodDelete {
-			w.WriteHeader(http.StatusOK)
+		if request.Method == http.MethodDelete {
+			responseWriter.WriteHeader(http.StatusOK)
+
 			return
 		}
-		w.WriteHeader(http.StatusOK)
+		responseWriter.WriteHeader(http.StatusOK)
 	}))
 	defer server.Close()
 
-	req := PermissionRequest{
+	req := approver.PermissionRequest{
 		HookEventName: "PreToolUse",
 		ToolName:      "Bash",
 		ToolInput:     json.RawMessage(`{"command":"npm test"}`),
-		PermissionSuggestions: []map[string]interface{}{
+		PermissionSuggestions: []map[string]any{
 			{"type": "toolAlwaysAllow", "tool": "Bash"},
 		},
 	}
 
-	ProcessHook(context.Background(), req, ApproverConfig{
+	approver.ProcessHook(context.Background(), req, approver.ApproverConfig{
 		Server:     server.URL,
 		Topic:      "test-topic",
 		Timeout:    200 * time.Millisecond,
@@ -151,15 +163,15 @@ func TestProcessHookAlwaysApprove(t *testing.T) {
 	server := newTestServer("always_approve")
 	defer server.Close()
 
-	req := PermissionRequest{
+	req := approver.PermissionRequest{
 		ToolName:  "Bash",
 		ToolInput: json.RawMessage(`{"command":"npm test"}`),
-		PermissionSuggestions: []map[string]interface{}{
+		PermissionSuggestions: []map[string]any{
 			{"type": "toolAlwaysAllow", "tool": "Bash"},
 		},
 	}
 
-	out := ProcessHook(context.Background(), req, ApproverConfig{
+	out := approver.ProcessHook(context.Background(), req, approver.ApproverConfig{
 		Server:     server.URL,
 		Topic:      "test-topic",
 		Timeout:    5 * time.Second,
@@ -175,12 +187,12 @@ func TestProcessHookDeny(t *testing.T) {
 	server := newTestServer("deny")
 	defer server.Close()
 
-	req := PermissionRequest{
+	req := approver.PermissionRequest{
 		ToolName:  "Write",
 		ToolInput: json.RawMessage(`{"file_path":"/tmp/test.txt"}`),
 	}
 
-	out := ProcessHook(context.Background(), req, ApproverConfig{
+	out := approver.ProcessHook(context.Background(), req, approver.ApproverConfig{
 		Server:     server.URL,
 		Topic:      "test",
 		Timeout:    5 * time.Second,
@@ -195,12 +207,12 @@ func TestProcessHookDeny(t *testing.T) {
 func TestFormatToolInfo(t *testing.T) {
 	tests := []struct {
 		name string
-		req  PermissionRequest
+		req  approver.PermissionRequest
 		want string
 	}{
 		{
 			name: "bash command",
-			req: PermissionRequest{
+			req: approver.PermissionRequest{
 				ToolName:  "Bash",
 				ToolInput: json.RawMessage(`{"command":"npm test"}`),
 			},
@@ -208,9 +220,10 @@ func TestFormatToolInfo(t *testing.T) {
 		},
 		{
 			name: "ask user question",
-			req: PermissionRequest{
-				ToolName:  "AskUserQuestion",
-				ToolInput: json.RawMessage(`{"questions":[{"question":"Which?","options":[{"label":"A","description":"Option A"}]}]}`),
+			req: approver.PermissionRequest{
+				ToolName: "AskUserQuestion",
+				ToolInput: json.RawMessage(`{"questions":[{"question":"Which?",` +
+					`"options":[{"label":"A","description":"Option A"}]}]}`),
 			},
 			want: "Which?",
 		},
@@ -218,9 +231,9 @@ func TestFormatToolInfo(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := formatToolInfo(tt.req)
+			got := approver.FormatToolInfo(tt.req)
 			if !strings.Contains(got, tt.want) {
-				t.Errorf("formatToolInfo() = %q, want to contain %q", got, tt.want)
+				t.Errorf("FormatToolInfo() = %q, want to contain %q", got, tt.want)
 			}
 		})
 	}
@@ -239,27 +252,29 @@ func TestBuildNotificationTitle(t *testing.T) {
 		{"AskUserQuestion", "Server1", "Server1 - Question"},
 	}
 	for _, tt := range tests {
-		got := buildNotificationTitle(PermissionRequest{ToolName: tt.tool}, tt.prefix)
+		got := approver.BuildNotificationTitle(approver.PermissionRequest{ToolName: tt.tool}, tt.prefix)
 		if got != tt.want {
-			t.Errorf("buildNotificationTitle(%q, %q) = %q, want %q", tt.tool, tt.prefix, got, tt.want)
+			t.Errorf("BuildNotificationTitle(%q, %q) = %q, want %q", tt.tool, tt.prefix, got, tt.want)
 		}
 	}
 }
 
 func TestProcessHookTimeout(t *testing.T) {
 	done := make(chan struct{})
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodPost {
-			w.WriteHeader(http.StatusOK)
-			w.Write([]byte(`{"id":"test-msg-id"}`))
+	server := httptest.NewServer(http.HandlerFunc(func(responseWriter http.ResponseWriter, request *http.Request) {
+		if request.Method == http.MethodPost {
+			responseWriter.WriteHeader(http.StatusOK)
+			writeBody(responseWriter, `{"id":"test-msg-id"}`)
+
 			return
 		}
-		if r.Method == http.MethodDelete {
-			w.WriteHeader(http.StatusOK)
+		if request.Method == http.MethodDelete {
+			responseWriter.WriteHeader(http.StatusOK)
+
 			return
 		}
-		w.WriteHeader(http.StatusOK)
-		w.Write([]byte("\n"))
+		responseWriter.WriteHeader(http.StatusOK)
+		writeBody(responseWriter, "\n")
 		<-done
 	}))
 	defer server.Close()
@@ -268,12 +283,12 @@ func TestProcessHookTimeout(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 	defer cancel()
 
-	req := PermissionRequest{
+	req := approver.PermissionRequest{
 		ToolName:  "Bash",
 		ToolInput: json.RawMessage(`{"command":"ls"}`),
 	}
 
-	out := ProcessHook(ctx, req, ApproverConfig{
+	out := approver.ProcessHook(ctx, req, approver.ApproverConfig{
 		Server:     server.URL,
 		Topic:      "test",
 		Timeout:    200 * time.Millisecond,
@@ -286,17 +301,17 @@ func TestProcessHookTimeout(t *testing.T) {
 }
 
 func TestProcessHookPublishFails(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusInternalServerError)
+	server := httptest.NewServer(http.HandlerFunc(func(responseWriter http.ResponseWriter, request *http.Request) {
+		responseWriter.WriteHeader(http.StatusInternalServerError)
 	}))
 	defer server.Close()
 
-	req := PermissionRequest{
+	req := approver.PermissionRequest{
 		ToolName:  "Bash",
 		ToolInput: json.RawMessage(`{"command":"ls"}`),
 	}
 
-	out := ProcessHook(context.Background(), req, ApproverConfig{
+	out := approver.ProcessHook(context.Background(), req, approver.ApproverConfig{
 		Server:     server.URL,
 		Topic:      "test",
 		Timeout:    2 * time.Second,
@@ -311,17 +326,19 @@ func TestProcessHookPublishFails(t *testing.T) {
 // newAskServer returns a test server that records the Actions header from the
 // publish POST and then responds on the SSE stream with the given answer.
 func newAskServer(answer string, capturedActions *string) *httptest.Server {
-	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodDelete {
-			w.WriteHeader(http.StatusOK)
+	return httptest.NewServer(http.HandlerFunc(func(responseWriter http.ResponseWriter, request *http.Request) {
+		if request.Method == http.MethodDelete {
+			responseWriter.WriteHeader(http.StatusOK)
+
 			return
 		}
-		if r.Method == http.MethodPost {
+		if request.Method == http.MethodPost {
 			if capturedActions != nil {
-				*capturedActions = r.Header.Get("Actions")
+				*capturedActions = request.Header.Get("Actions")
 			}
-			w.WriteHeader(http.StatusOK)
-			w.Write([]byte(`{"id":"test-msg-id"}`))
+			responseWriter.WriteHeader(http.StatusOK)
+			writeBody(responseWriter, `{"id":"test-msg-id"}`)
+
 			return
 		}
 		// SSE response carrying the answer
@@ -329,8 +346,8 @@ func newAskServer(answer string, capturedActions *string) *httptest.Server {
 		resp := fmt.Sprintf(
 			`{"id":"1","event":"message","message":%s}`,
 			strconv.Quote(inner))
-		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(resp + "\n"))
+		responseWriter.WriteHeader(http.StatusOK)
+		writeBody(responseWriter, resp+"\n")
 	}))
 }
 
@@ -343,19 +360,19 @@ func TestProcessAskUserQuestionSingle(t *testing.T) {
 		`{"label":"Option A","description":"first"},` +
 		`{"label":"Option B","description":"second"}]}]}`
 
-	req := PermissionRequest{
+	req := approver.PermissionRequest{
 		ToolName:  "AskUserQuestion",
 		ToolInput: json.RawMessage(toolInput),
 	}
 
-	out := ProcessHook(context.Background(), req, ApproverConfig{
+	out := approver.ProcessHook(context.Background(), req, approver.ApproverConfig{
 		Server:     server.URL,
 		Topic:      "test-topic",
 		Timeout:    5 * time.Second,
 		GenerateID: fixedID,
 	})
 
-	s := string(out)
+	output := string(out)
 	// Buttons must use the "answer" field, not "decision". The actions header is
 	// a JSON array of objects, so the inner quotes are escaped.
 	wantAnswer := `\"answer\":\"Option A\"`
@@ -365,39 +382,40 @@ func TestProcessAskUserQuestionSingle(t *testing.T) {
 	if strings.Contains(actions, `\"decision\":\"Option A\"`) {
 		t.Errorf("actions should not use decision field for AskUserQuestion: %s", actions)
 	}
-	if !strings.Contains(s, `"behavior":"allow"`) {
-		t.Errorf("expected allow decision: %s", s)
+	if !strings.Contains(output, `"behavior":"allow"`) {
+		t.Errorf("expected allow decision: %s", output)
 	}
-	if !strings.Contains(s, `"updatedInput"`) {
-		t.Errorf("expected updatedInput in output: %s", s)
+	if !strings.Contains(output, `"updatedInput"`) {
+		t.Errorf("expected updatedInput in output: %s", output)
 	}
-	if !strings.Contains(s, `"Which?":"Option A"`) {
-		t.Errorf("expected answers map entry: %s", s)
+	if !strings.Contains(output, `"Which?":"Option A"`) {
+		t.Errorf("expected answers map entry: %s", output)
 	}
 }
 
 func TestProcessAskUserQuestionNoAnswer(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodPost {
-			w.WriteHeader(http.StatusOK)
-			w.Write([]byte(`{"id":"test-msg-id"}`))
+	server := httptest.NewServer(http.HandlerFunc(func(responseWriter http.ResponseWriter, request *http.Request) {
+		if request.Method == http.MethodPost {
+			responseWriter.WriteHeader(http.StatusOK)
+			writeBody(responseWriter, `{"id":"test-msg-id"}`)
+
 			return
 		}
 		// SSE returns a response with no answer
 		inner := fmt.Sprintf(`{"requestId":"%s","decision":"approve"}`, testRequestID)
 		resp := fmt.Sprintf(`{"id":"1","event":"message","message":%s}`, strconv.Quote(inner))
-		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(resp + "\n"))
+		responseWriter.WriteHeader(http.StatusOK)
+		writeBody(responseWriter, resp+"\n")
 	}))
 	defer server.Close()
 
 	toolInput := `{"questions":[{"question":"Which?","options":[{"label":"A","description":"x"}]}]}`
-	req := PermissionRequest{
+	req := approver.PermissionRequest{
 		ToolName:  "AskUserQuestion",
 		ToolInput: json.RawMessage(toolInput),
 	}
 
-	out := ProcessHook(context.Background(), req, ApproverConfig{
+	out := approver.ProcessHook(context.Background(), req, approver.ApproverConfig{
 		Server:     server.URL,
 		Topic:      "test-topic",
 		Timeout:    5 * time.Second,
@@ -411,21 +429,23 @@ func TestProcessAskUserQuestionNoAnswer(t *testing.T) {
 
 func TestProcessAskUserQuestionBatched(t *testing.T) {
 	postCount := 0
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodPost {
+	server := httptest.NewServer(http.HandlerFunc(func(responseWriter http.ResponseWriter, request *http.Request) {
+		if request.Method == http.MethodPost {
 			postCount++
-			w.WriteHeader(http.StatusOK)
-			w.Write([]byte(`{"id":"test-msg-id"}`))
+			responseWriter.WriteHeader(http.StatusOK)
+			writeBody(responseWriter, `{"id":"test-msg-id"}`)
+
 			return
 		}
-		if r.Method == http.MethodDelete {
-			w.WriteHeader(http.StatusOK)
+		if request.Method == http.MethodDelete {
+			responseWriter.WriteHeader(http.StatusOK)
+
 			return
 		}
 		inner := fmt.Sprintf(`{"requestId":"%s","answer":"D"}`, testRequestID)
 		resp := fmt.Sprintf(`{"id":"1","event":"message","message":%s}`, strconv.Quote(inner))
-		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(resp + "\n"))
+		responseWriter.WriteHeader(http.StatusOK)
+		writeBody(responseWriter, resp+"\n")
 	}))
 	defer server.Close()
 
@@ -434,12 +454,12 @@ func TestProcessAskUserQuestionBatched(t *testing.T) {
 		`{"label":"A","description":"a"},{"label":"B","description":"b"},{"label":"C","description":"c"},` +
 		`{"label":"D","description":"d"},{"label":"E","description":"e"}]}]}`
 
-	req := PermissionRequest{
+	req := approver.PermissionRequest{
 		ToolName:  "AskUserQuestion",
 		ToolInput: json.RawMessage(toolInput),
 	}
 
-	out := ProcessHook(context.Background(), req, ApproverConfig{
+	out := approver.ProcessHook(context.Background(), req, approver.ApproverConfig{
 		Server:     server.URL,
 		Topic:      "test-topic",
 		Timeout:    5 * time.Second,

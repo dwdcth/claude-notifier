@@ -19,6 +19,9 @@ const (
 	// line we are willing to parse. transcript.jsonl lines are usually
 	// small, but tool_result payloads can be large.
 	transcriptScannerMaxSize = 4 * 1024 * 1024
+	// transcriptScannerInitialBuf is the initial buffer size of the
+	// jsonl scanner; it grows on demand up to transcriptScannerMaxSize.
+	transcriptScannerInitialBuf = 64 * 1024
 	// transcriptRaceRetries is how many times we re-read the transcript
 	// when the last entry is a user message (meaning the assistant
 	// reply for the current turn has not been flushed yet). The Stop
@@ -64,9 +67,8 @@ type transcriptContentBlock struct {
 // user message. When that happens we retry a few times so the
 // notification shows the actual current reply instead of the previous
 // turn's.
-func extractLastPromptAndReply(transcriptPath string) (userPrompt, assistantReply string, err error) {
-	var lastRole string
-	userPrompt, assistantReply, lastRole, err = readOnce(transcriptPath)
+func extractLastPromptAndReply(transcriptPath string) (string, string, error) {
+	userPrompt, assistantReply, lastRole, err := readOnce(transcriptPath)
 	if err != nil {
 		return "", "", err
 	}
@@ -75,65 +77,51 @@ func extractLastPromptAndReply(transcriptPath string) (userPrompt, assistantRepl
 	// for this turn may still be in flight — wait and retry.
 	for i := 0; i < transcriptRaceRetries && lastRole == "user"; i++ {
 		time.Sleep(transcriptRaceInterval)
-		var retryLastRole string
-		var retryErr error
-		userPrompt, assistantReply, retryLastRole, retryErr = readOnce(transcriptPath)
+
+		retriedPrompt, retriedReply, retriedRole, retryErr := readOnce(transcriptPath)
 		if retryErr != nil {
 			return "", "", retryErr
 		}
-		lastRole = retryLastRole
+
+		userPrompt, assistantReply, lastRole = retriedPrompt, retriedReply, retriedRole
 	}
 
 	userPrompt = truncateForNotification(userPrompt)
 	assistantReply = truncateForNotification(assistantReply)
+
 	return userPrompt, assistantReply, nil
 }
 
 // readOnce does a single pass over the transcript file. It returns the
 // last text-bearing user prompt, the last text-bearing assistant reply
 // and the role of the final parsed entry in the file ("" if empty).
-func readOnce(transcriptPath string) (userPrompt, assistantReply, lastRole string, err error) {
-	f, err := os.Open(transcriptPath)
+func readOnce(transcriptPath string) (string, string, string, error) {
+	file, err := os.Open(transcriptPath)
 	if err != nil {
 		return "", "", "", fmt.Errorf("opening transcript: %w", err)
 	}
-	defer func() { _ = f.Close() }()
+	defer func() { _ = file.Close() }()
 
-	scanner := bufio.NewScanner(f)
-	scanner.Buffer(make([]byte, 0, 64*1024), transcriptScannerMaxSize)
+	scanner := bufio.NewScanner(file)
+	scanner.Buffer(make([]byte, 0, transcriptScannerInitialBuf), transcriptScannerMaxSize)
 
+	var userPrompt, assistantReply, lastRole string
 	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" {
-			continue
-		}
-
-		var entry transcriptEntry
-		if err := json.Unmarshal([]byte(line), &entry); err != nil {
-			// Skip malformed lines silently — transcript.jsonl is
-			// append-only and we only need the entries we can parse.
-			continue
-		}
-
-		var msg transcriptMessage
-		if len(entry.Message) == 0 {
-			continue
-		}
-		if err := json.Unmarshal(entry.Message, &msg); err != nil {
+		role, text, ok := parseTranscriptLine(scanner.Text())
+		if !ok {
 			continue
 		}
 
 		// Track the role of the most recent parseable entry regardless
 		// of whether it carries text — the caller uses this to detect
 		// a still-pending assistant reply.
-		lastRole = msg.Role
+		lastRole = role
 
-		text := firstTextBlock(msg.Content)
 		if text == "" {
 			continue
 		}
 
-		switch msg.Role {
+		switch role {
 		case "user":
 			userPrompt = text
 		case "assistant":
@@ -141,11 +129,44 @@ func readOnce(transcriptPath string) (userPrompt, assistantReply, lastRole strin
 		}
 	}
 
-	if err := scanner.Err(); err != nil {
+	err = scanner.Err()
+	if err != nil {
 		return "", "", "", fmt.Errorf("reading transcript: %w", err)
 	}
 
 	return userPrompt, assistantReply, lastRole, nil
+}
+
+// parseTranscriptLine decodes a single transcript.jsonl line into the
+// entry's message role and its first text block. ok is false for blank
+// or malformed lines and for entries without a parseable message; text
+// is empty when the message carries no text block (e.g. tool_result
+// only).
+func parseTranscriptLine(line string) (string, string, bool) {
+	line = strings.TrimSpace(line)
+	if line == "" {
+		return "", "", false
+	}
+
+	var entry transcriptEntry
+	err := json.Unmarshal([]byte(line), &entry)
+	if err != nil {
+		// Skip malformed lines silently — transcript.jsonl is
+		// append-only and we only need the entries we can parse.
+		return "", "", false
+	}
+
+	if len(entry.Message) == 0 {
+		return "", "", false
+	}
+
+	var msg transcriptMessage
+	err = json.Unmarshal(entry.Message, &msg)
+	if err != nil {
+		return "", "", false
+	}
+
+	return msg.Role, firstTextBlock(msg.Content), true
 }
 
 // firstTextBlock extracts the first text content from a transcript
@@ -158,13 +179,15 @@ func firstTextBlock(content json.RawMessage) string {
 
 	// Try string first.
 	var s string
-	if err := json.Unmarshal(content, &s); err == nil {
+	err := json.Unmarshal(content, &s)
+	if err == nil {
 		return s
 	}
 
 	// Fall back to array of blocks; return the first text block.
 	var blocks []transcriptContentBlock
-	if err := json.Unmarshal(content, &blocks); err == nil {
+	err = json.Unmarshal(content, &blocks)
+	if err == nil {
 		for _, b := range blocks {
 			if b.Type == "text" && b.Text != "" {
 				return b.Text
@@ -181,5 +204,6 @@ func firstTextBlock(content json.RawMessage) string {
 // are never split, which would produce invalid UTF-8 output.
 func truncateForNotification(s string) string {
 	s = ntfyclient.StripMarkdown(s)
+
 	return ntfyclient.TruncateRunes(s, transcriptMaxTruncate)
 }

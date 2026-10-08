@@ -1,14 +1,16 @@
-package settings
+package settings_test
 
 import (
 	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/felipeelias/claude-notifier/internal/settings"
 )
 
 func TestLoadNonexistent(t *testing.T) {
-	s, err := Load("/nonexistent/path/settings.json")
+	s, err := settings.Load("/nonexistent/path/settings.json")
 	if err != nil {
 		t.Fatalf("error: %v", err)
 	}
@@ -21,20 +23,21 @@ func TestLoadAndSave(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "settings.json")
 
-	s := &Settings{
-		Hooks: map[string][]HookMatcher{
+	cfg := &settings.Settings{
+		Hooks: map[string][]settings.HookMatcher{
 			"PermissionRequest": {
-				{Hooks: []HookConfig{
+				{Hooks: []settings.HookConfig{
 					{Type: "command", Command: "claude-notifier hook"},
 				}},
 			},
 		},
 	}
-	if err := s.Save(path); err != nil {
+	err := cfg.Save(path)
+	if err != nil {
 		t.Fatalf("save: %v", err)
 	}
 
-	loaded, err := Load(path)
+	loaded, err := settings.Load(path)
 	if err != nil {
 		t.Fatalf("load: %v", err)
 	}
@@ -44,7 +47,7 @@ func TestLoadAndSave(t *testing.T) {
 }
 
 func TestRegisterHook(t *testing.T) {
-	s := &Settings{Hooks: make(map[string][]HookMatcher)}
+	s := &settings.Settings{Hooks: make(map[string][]settings.HookMatcher)}
 	s.RegisterHook("/usr/local/bin/claude-notifier", "claude-notifier")
 
 	matchers := s.Hooks["PermissionRequest"]
@@ -61,7 +64,7 @@ func TestRegisterHook(t *testing.T) {
 }
 
 func TestRegisterHookIdempotent(t *testing.T) {
-	s := &Settings{Hooks: make(map[string][]HookMatcher)}
+	s := &settings.Settings{Hooks: make(map[string][]settings.HookMatcher)}
 	s.RegisterHook("/path", "claude-notifier")
 	s.RegisterHook("/path", "claude-notifier")
 
@@ -71,7 +74,7 @@ func TestRegisterHookIdempotent(t *testing.T) {
 }
 
 func TestUnregisterHook(t *testing.T) {
-	s := &Settings{Hooks: make(map[string][]HookMatcher)}
+	s := &settings.Settings{Hooks: make(map[string][]settings.HookMatcher)}
 	s.RegisterHook("/path", "claude-notifier")
 	s.UnregisterHook("claude-notifier")
 
@@ -81,13 +84,13 @@ func TestUnregisterHook(t *testing.T) {
 }
 
 func TestUnregisterHookNotPresent(t *testing.T) {
-	s := &Settings{Hooks: make(map[string][]HookMatcher)}
+	s := &settings.Settings{Hooks: make(map[string][]settings.HookMatcher)}
 	s.UnregisterHook("claude-notifier")
 	// Should not panic
 }
 
 func TestIsHookRegistered(t *testing.T) {
-	s := &Settings{Hooks: make(map[string][]HookMatcher)}
+	s := &settings.Settings{Hooks: make(map[string][]settings.HookMatcher)}
 	if s.IsHookRegistered("claude-notifier") {
 		t.Error("should not be registered")
 	}
@@ -98,7 +101,7 @@ func TestIsHookRegistered(t *testing.T) {
 }
 
 func TestDefaultPath(t *testing.T) {
-	path, err := DefaultPath()
+	path, err := settings.DefaultPath()
 	if err != nil {
 		t.Fatalf("error: %v", err)
 	}
@@ -111,8 +114,9 @@ func TestSaveFilePerms(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "settings.json")
 
-	s := &Settings{Hooks: make(map[string][]HookMatcher)}
-	if err := s.Save(path); err != nil {
+	s := &settings.Settings{Hooks: make(map[string][]settings.HookMatcher)}
+	err := s.Save(path)
+	if err != nil {
 		t.Fatalf("save: %v", err)
 	}
 
@@ -129,37 +133,36 @@ func TestLoadExistingFile(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "settings.json")
 
-	existing := map[string]interface{}{
-		"hooks": map[string]interface{}{
-			"Notification": []interface{}{
-				map[string]interface{}{
-					"hooks": []interface{}{
-						map[string]interface{}{
-							"type":    "command",
-							"command": "existing-hook",
-						},
-					},
+	existing := map[string]any{
+		"hooks": map[string]any{
+			"Notification": []any{
+				map[string]any{
+					"type":    "command",
+					"command": "existing-hook",
 				},
 			},
 		},
 	}
-	data, _ := json.Marshal(existing)
-	os.WriteFile(path, data, 0644)
+	data, err := json.Marshal(existing)
+	if err != nil {
+		t.Fatalf("marshal existing settings: %v", err)
+	}
+	_ = os.WriteFile(path, data, 0644) // fixture setup; the Load below fails if it did not land
 
-	s, err := Load(path)
+	cfg, err := settings.Load(path)
 	if err != nil {
 		t.Fatalf("load: %v", err)
 	}
 
-	if !s.IsHookEventRegistered("Notification") {
+	if !cfg.IsHookEventRegistered("Notification") {
 		t.Error("expected Notification hook to be preserved")
 	}
 
 	// Register new hook
-	s.RegisterHook("/path", "claude-notifier")
-	s.Save(path)
+	cfg.RegisterHook("/path", "claude-notifier")
+	_ = cfg.Save(path) // a failed save would surface via the reload assertions below
 
-	loaded, _ := Load(path)
+	loaded, _ := settings.Load(path)
 	if !loaded.IsHookEventRegistered("Notification") {
 		t.Error("Notification hook should still exist")
 	}

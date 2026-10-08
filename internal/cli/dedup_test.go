@@ -1,4 +1,4 @@
-package cli
+package cli_test
 
 import (
 	"os"
@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	appcli "github.com/felipeelias/claude-notifier/internal/cli"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -18,13 +19,13 @@ func withTempCache(t *testing.T) {
 
 func TestShouldSendFirstTime(t *testing.T) {
 	withTempCache(t)
-	assert.True(t, ShouldSend("session-1", "hello"), "first send must pass")
+	assert.True(t, appcli.ShouldSend("session-1", "hello"), "first send must pass")
 }
 
 func TestShouldSendDuplicate(t *testing.T) {
 	withTempCache(t)
-	Record("session-1", "hello")
-	assert.False(t, ShouldSend("session-1", "hello"),
+	appcli.Record("session-1", "hello")
+	assert.False(t, appcli.ShouldSend("session-1", "hello"),
 		"identical message inside the window must be deduped")
 }
 
@@ -32,54 +33,56 @@ func TestShouldSendAfterWindow(t *testing.T) {
 	withTempCache(t)
 
 	// Seed an entry whose timestamp is just past the dedup window.
-	h := hashMessage("hello")
-	store := loadDedup()
-	store.Sessions["session-1"] = dedupEntry{
-		Hash: h,
-		TS:   time.Now().Add(-dedupWindow - time.Second),
+	msgHash := appcli.HashMessage("hello")
+	store := appcli.LoadDedup()
+	store.Sessions["session-1"] = appcli.DedupEntry{
+		Hash: msgHash,
+		TS:   time.Now().Add(-appcli.DedupWindow - time.Second),
 	}
-	require.NoError(t, saveDedup(store))
+	require.NoError(t, appcli.SaveDedup(store))
 
-	assert.True(t, ShouldSend("session-1", "hello"),
+	assert.True(t, appcli.ShouldSend("session-1", "hello"),
 		"same message outside the window must pass")
 }
 
 func TestShouldSendDifferentMsg(t *testing.T) {
 	withTempCache(t)
-	Record("session-1", "hello")
-	assert.True(t, ShouldSend("session-1", "different"),
+	appcli.Record("session-1", "hello")
+	assert.True(t, appcli.ShouldSend("session-1", "different"),
 		"different message under the same session must pass")
 }
 
 func TestShouldSendDifferentSession(t *testing.T) {
 	withTempCache(t)
-	Record("session-1", "hello")
-	assert.True(t, ShouldSend("session-2", "hello"),
+	appcli.Record("session-1", "hello")
+	assert.True(t, appcli.ShouldSend("session-2", "hello"),
 		"same message under a different session must pass")
 }
 
 func TestShouldSendEmptySession(t *testing.T) {
 	withTempCache(t)
-	Record("", "hello")                     // no-op, must not error
-	assert.True(t, ShouldSend("", "hello")) // empty session always passes
+	appcli.Record("", "hello")                     // no-op, must not error
+	assert.True(t, appcli.ShouldSend("", "hello")) // empty session always passes
 }
 
 func TestShouldSendCorruptedStoreFailsOpen(t *testing.T) {
 	withTempCache(t)
 
-	p, err := dedupPath()
+	path, err := appcli.DedupPath()
 	require.NoError(t, err)
-	require.NoError(t, writeGarbage(p))
+	require.NoError(t, writeGarbage(path))
 
 	// Corrupted store must fail open: first send returns true.
-	assert.True(t, ShouldSend("session-1", "hello"))
+	assert.True(t, appcli.ShouldSend("session-1", "hello"))
 }
 
 // writeGarbage writes invalid JSON to the dedup path so we can verify
 // fail-open behaviour. Lives here (not in dedup.go) because it is test-only.
 func writeGarbage(path string) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+	err := os.MkdirAll(filepath.Dir(path), 0o700)
+	if err != nil {
 		return err
 	}
+
 	return os.WriteFile(path, []byte("{not valid json"), 0o600)
 }

@@ -1,4 +1,4 @@
-package cli
+package cli_test
 
 import (
 	"os"
@@ -9,6 +9,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	appcli "github.com/felipeelias/claude-notifier/internal/cli"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -24,14 +25,14 @@ func TestExtractLastPromptAndReply_EmptyFile(t *testing.T) {
 	path := filepath.Join(dir, "t.jsonl")
 	writeLines(t, path)
 
-	user, reply, err := extractLastPromptAndReply(path)
+	user, reply, err := appcli.ExtractLastPromptAndReply(path)
 	require.NoError(t, err)
-	assert.Equal(t, "", user)
-	assert.Equal(t, "", reply)
+	assert.Empty(t, user)
+	assert.Empty(t, reply)
 }
 
 func TestExtractLastPromptAndReply_FileMissing(t *testing.T) {
-	_, _, err := extractLastPromptAndReply("/does/not/exist.jsonl")
+	_, _, err := appcli.ExtractLastPromptAndReply("/does/not/exist.jsonl")
 	assert.Error(t, err)
 }
 
@@ -40,10 +41,10 @@ func TestExtractLastPromptAndReply_OnlyUser(t *testing.T) {
 	path := filepath.Join(dir, "t.jsonl")
 	writeLines(t, path, `{"type":"user","message":{"role":"user","content":"hello there"}}`)
 
-	user, reply, err := extractLastPromptAndReply(path)
+	user, reply, err := appcli.ExtractLastPromptAndReply(path)
 	require.NoError(t, err)
 	assert.Equal(t, "hello there", user)
-	assert.Equal(t, "", reply)
+	assert.Empty(t, reply)
 }
 
 func TestExtractLastPromptAndReply_StringContent(t *testing.T) {
@@ -54,7 +55,7 @@ func TestExtractLastPromptAndReply_StringContent(t *testing.T) {
 		`{"type":"assistant","message":{"role":"assistant","content":"sure thing"}}`,
 	)
 
-	user, reply, err := extractLastPromptAndReply(path)
+	user, reply, err := appcli.ExtractLastPromptAndReply(path)
 	require.NoError(t, err)
 	assert.Equal(t, "first prompt", user)
 	assert.Equal(t, "sure thing", reply)
@@ -65,10 +66,13 @@ func TestExtractLastPromptAndReply_ArrayContentPicksText(t *testing.T) {
 	path := filepath.Join(dir, "t.jsonl")
 	writeLines(t, path,
 		`{"type":"user","message":{"role":"user","content":[{"type":"text","text":"what is 2+2?"}]}}`,
-		`{"type":"assistant","message":{"role":"assistant","content":[{"type":"thinking","text":"internal"},{"type":"text","text":"it is 4"},{"type":"tool_use","text":"ignored"}]}}`,
+		`{"type":"assistant","message":{"role":"assistant","content":[`+
+			`{"type":"thinking","text":"internal"},`+
+			`{"type":"text","text":"it is 4"},`+
+			`{"type":"tool_use","text":"ignored"}]}}`,
 	)
 
-	user, reply, err := extractLastPromptAndReply(path)
+	user, reply, err := appcli.ExtractLastPromptAndReply(path)
 	require.NoError(t, err)
 	assert.Equal(t, "what is 2+2?", user)
 	assert.Equal(t, "it is 4", reply)
@@ -83,7 +87,7 @@ func TestExtractLastPromptAndReply_SkipsToolResultOnlyUserEntries(t *testing.T) 
 		`{"type":"user","message":{"role":"user","content":[{"type":"tool_result","text":"some output"}]}}`,
 	)
 
-	user, reply, err := extractLastPromptAndReply(path)
+	user, reply, err := appcli.ExtractLastPromptAndReply(path)
 	require.NoError(t, err)
 	assert.Equal(t, "real question", user, "should keep last text-bearing user message")
 	assert.Equal(t, "real answer", reply)
@@ -99,7 +103,7 @@ func TestExtractLastPromptAndReply_PicksLatestOfMultipleTurns(t *testing.T) {
 		`{"type":"assistant","message":{"role":"assistant","content":"new answer"}}`,
 	)
 
-	user, reply, err := extractLastPromptAndReply(path)
+	user, reply, err := appcli.ExtractLastPromptAndReply(path)
 	require.NoError(t, err)
 	assert.Equal(t, "new question", user)
 	assert.Equal(t, "new answer", reply)
@@ -115,7 +119,7 @@ func TestExtractLastPromptAndReply_TruncatesLongText(t *testing.T) {
 		`{"type":"assistant","message":{"role":"assistant","content":"`+longReply+`"}}`,
 	)
 
-	user, reply, err := extractLastPromptAndReply(path)
+	user, reply, err := appcli.ExtractLastPromptAndReply(path)
 	require.NoError(t, err)
 	require.Len(t, user, 53) // 50 + "..."
 	require.True(t, strings.HasPrefix(user, strings.Repeat("a", 50)))
@@ -133,14 +137,16 @@ func TestExtractLastPromptAndReply_TruncatesLongText(t *testing.T) {
 func TestExtractLastPromptAndReply_TruncatesChineseAsRunes(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "t.jsonl")
-	longPrompt := strings.Repeat("中", 200) // 600 bytes
-	longReply := strings.Repeat("答", 200)  // 600 bytes
+	// "中"/"答" are the Han runes 中/答, written as escape
+	// sequences because gosmopolitan flags intentional Han literals.
+	longPrompt := strings.Repeat("\u4e2d", 200) // 600 bytes
+	longReply := strings.Repeat("\u7b54", 200)  // 600 bytes
 	writeLines(t, path,
 		`{"type":"user","message":{"role":"user","content":"`+longPrompt+`"}}`,
 		`{"type":"assistant","message":{"role":"assistant","content":"`+longReply+`"}}`,
 	)
 
-	user, reply, err := extractLastPromptAndReply(path)
+	user, reply, err := appcli.ExtractLastPromptAndReply(path)
 	require.NoError(t, err)
 
 	require.True(t, utf8.ValidString(user), "user prompt must be valid UTF-8 after truncation")
@@ -151,10 +157,10 @@ func TestExtractLastPromptAndReply_TruncatesChineseAsRunes(t *testing.T) {
 	require.Len(t, []rune(user), 53, "expected 50 runes + ellipsis")
 	require.Len(t, []rune(reply), 53)
 
-	require.True(t, strings.HasPrefix(user, strings.Repeat("中", 50)),
+	require.True(t, strings.HasPrefix(user, strings.Repeat("\u4e2d", 50)),
 		"user prompt should start with 50 Chinese characters, got %q", user)
 	require.True(t, strings.HasSuffix(user, "..."))
-	require.True(t, strings.HasPrefix(reply, strings.Repeat("答", 50)))
+	require.True(t, strings.HasPrefix(reply, strings.Repeat("\u7b54", 50)))
 	require.True(t, strings.HasSuffix(reply, "..."))
 
 	// Sanity check: byte length must be 153, NOT 50 — 50 bytes would mean
@@ -171,7 +177,7 @@ func TestExtractLastPromptAndReply_StripsMarkdown(t *testing.T) {
 		`{"type":"assistant","message":{"role":"assistant","content":"# heading\n\nreply with `+"`code`"+`"}}`,
 	)
 
-	user, reply, err := extractLastPromptAndReply(path)
+	user, reply, err := appcli.ExtractLastPromptAndReply(path)
 	require.NoError(t, err)
 	assert.NotContains(t, user, "**")
 	assert.NotContains(t, user, "[link]")
@@ -189,31 +195,31 @@ func TestExtractLastPromptAndReply_SkipsMalformedLines(t *testing.T) {
 		`{"type":"assistant","message":{"role":"assistant","content":"good reply"}}`,
 	)
 
-	user, reply, err := extractLastPromptAndReply(path)
+	user, reply, err := appcli.ExtractLastPromptAndReply(path)
 	require.NoError(t, err)
 	assert.Equal(t, "good prompt", user)
 	assert.Equal(t, "good reply", reply)
 }
 
 func TestBuildStopMessage_FallbackWhenNoPromptOrReply(t *testing.T) {
-	assert.Equal(t, "Conversation ended in myproject", buildStopMessage("myproject", "", ""))
+	assert.Equal(t, "Conversation ended in myproject", appcli.BuildStopMessage("myproject", "", ""))
 }
 
 func TestBuildStopMessage_OnlyUser(t *testing.T) {
-	msg := buildStopMessage("p", "fix the bug", "")
-	assert.Contains(t, msg, "💬 你: fix the bug")
+	msg := appcli.BuildStopMessage("p", "fix the bug", "")
+	assert.Contains(t, msg, "💬 \u4f60: fix the bug")
 	assert.NotContains(t, msg, "🤖")
 }
 
 func TestBuildStopMessage_OnlyReply(t *testing.T) {
-	msg := buildStopMessage("p", "", "done")
+	msg := appcli.BuildStopMessage("p", "", "done")
 	assert.Contains(t, msg, "🤖 AI: done")
 	assert.NotContains(t, msg, "💬")
 }
 
 func TestBuildStopMessage_Both(t *testing.T) {
-	msg := buildStopMessage("p", "question", "answer")
-	assert.Contains(t, msg, "💬 你: question")
+	msg := appcli.BuildStopMessage("p", "question", "answer")
+	assert.Contains(t, msg, "💬 \u4f60: question")
 	assert.Contains(t, msg, "🤖 AI: answer")
 	assert.Contains(t, msg, "\n\n")
 }
@@ -234,21 +240,19 @@ func TestExtractLastPromptAndReply_WaitsForAssistantFlush(t *testing.T) {
 	)
 
 	var wg sync.WaitGroup
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		time.Sleep(transcriptRaceInterval + 50*time.Millisecond)
+	wg.Go(func() {
+		time.Sleep(appcli.TranscriptRaceInterval + 50*time.Millisecond)
 		// Append assistant reply. O_APPEND ensures the write is atomic
 		// with respect to the reader's bufio.Scan.
-		f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o600)
+		file, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o600)
 		if err != nil {
 			return
 		}
-		defer func() { _ = f.Close() }()
-		_, _ = f.WriteString(`{"type":"assistant","message":{"role":"assistant","content":"9"}}` + "\n")
-	}()
+		defer func() { _ = file.Close() }()
+		_, _ = file.WriteString(`{"type":"assistant","message":{"role":"assistant","content":"9"}}` + "\n")
+	})
 
-	user, reply, err := extractLastPromptAndReply(path)
+	user, reply, err := appcli.ExtractLastPromptAndReply(path)
 	wg.Wait()
 	require.NoError(t, err)
 	assert.Equal(t, "4+5=?", user)
@@ -266,11 +270,11 @@ func TestExtractLastPromptAndReply_GivesUpAfterRetries(t *testing.T) {
 	writeLines(t, path, `{"type":"user","message":{"role":"user","content":"stale"}}`)
 
 	start := time.Now()
-	user, reply, err := extractLastPromptAndReply(path)
+	user, reply, err := appcli.ExtractLastPromptAndReply(path)
 	elapsed := time.Since(start)
 	require.NoError(t, err)
 	assert.Equal(t, "stale", user)
-	assert.Equal(t, "", reply, "no assistant reply exists; should give up with empty string")
+	assert.Empty(t, reply, "no assistant reply exists; should give up with empty string")
 
 	// Must have actually waited through the retry window. Be slightly
 	// lenient to avoid flakes on slow CI.

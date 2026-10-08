@@ -7,6 +7,9 @@ import (
 	"path/filepath"
 )
 
+// settingsFilePerms restricts settings.json to owner-only access.
+const settingsFilePerms = 0600
+
 type HookConfig struct {
 	Type    string `json:"type"`
 	Command string `json:"command"`
@@ -25,6 +28,7 @@ func DefaultPath() (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("getting home dir: %w", err)
 	}
+
 	return filepath.Join(home, ".claude", "settings.json"), nil
 }
 
@@ -34,17 +38,20 @@ func Load(path string) (*Settings, error) {
 		if os.IsNotExist(err) {
 			return &Settings{Hooks: make(map[string][]HookMatcher)}, nil
 		}
+
 		return nil, fmt.Errorf("reading settings: %w", err)
 	}
 
-	var s Settings
-	if err := json.Unmarshal(data, &s); err != nil {
+	var parsed Settings
+	err = json.Unmarshal(data, &parsed)
+	if err != nil {
 		return nil, fmt.Errorf("parsing settings: %w", err)
 	}
-	if s.Hooks == nil {
-		s.Hooks = make(map[string][]HookMatcher)
+	if parsed.Hooks == nil {
+		parsed.Hooks = make(map[string][]HookMatcher)
 	}
-	return &s, nil
+
+	return &parsed, nil
 }
 
 func (s *Settings) Save(path string) error {
@@ -52,15 +59,17 @@ func (s *Settings) Save(path string) error {
 	if err != nil {
 		return fmt.Errorf("marshaling settings: %w", err)
 	}
-	if err := os.WriteFile(path, data, 0600); err != nil {
+	err = os.WriteFile(path, data, settingsFilePerms)
+	if err != nil {
 		return fmt.Errorf("writing settings: %w", err)
 	}
+
 	return nil
 }
 
 func (s *Settings) RegisterHook(hookPath, command string) {
 	const event = "PermissionRequest"
-	commandStr := fmt.Sprintf("%s hook", command)
+	commandStr := command + " hook"
 
 	if s.Hooks == nil {
 		s.Hooks = make(map[string][]HookMatcher)
@@ -84,7 +93,7 @@ func (s *Settings) RegisterHook(hookPath, command string) {
 
 func (s *Settings) UnregisterHook(command string) {
 	const event = "PermissionRequest"
-	commandStr := fmt.Sprintf("%s hook", command)
+	commandStr := command + " hook"
 
 	matchers, ok := s.Hooks[event]
 	if !ok {
@@ -92,16 +101,17 @@ func (s *Settings) UnregisterHook(command string) {
 	}
 
 	filtered := matchers[:0]
-	for _, m := range matchers {
+	for _, matcher := range matchers {
 		keep := true
-		for _, h := range m.Hooks {
+		for _, h := range matcher.Hooks {
 			if h.Command == commandStr {
 				keep = false
+
 				break
 			}
 		}
 		if keep {
-			filtered = append(filtered, m)
+			filtered = append(filtered, matcher)
 		}
 	}
 
@@ -114,7 +124,7 @@ func (s *Settings) UnregisterHook(command string) {
 
 func (s *Settings) IsHookRegistered(command string) bool {
 	const event = "PermissionRequest"
-	commandStr := fmt.Sprintf("%s hook", command)
+	commandStr := command + " hook"
 
 	matchers, ok := s.Hooks[event]
 	if !ok {
@@ -127,10 +137,12 @@ func (s *Settings) IsHookRegistered(command string) bool {
 			}
 		}
 	}
+
 	return false
 }
 
 func (s *Settings) IsHookEventRegistered(event string) bool {
 	_, ok := s.Hooks[event]
+
 	return ok
 }

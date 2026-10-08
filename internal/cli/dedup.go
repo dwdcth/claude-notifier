@@ -19,6 +19,10 @@ const (
 	// for cleanup. Set to 10x the window so transient read failures don't
 	// cause us to forget recent state too quickly.
 	dedupRetain = dedupWindow * 10
+	// dedupDirPerms and dedupFilePerms restrict the on-disk dedup state
+	// to the current user.
+	dedupDirPerms  = 0o700
+	dedupFilePerms = 0o600
 )
 
 // dedupEntry records the last sent message hash and timestamp for a session.
@@ -39,54 +43,66 @@ func dedupPath() (string, error) {
 	if xdg := os.Getenv("XDG_CACHE_HOME"); xdg != "" {
 		return filepath.Join(xdg, "claude-notifier", "dedup.json"), nil
 	}
+
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", fmt.Errorf("finding home dir: %w", err)
 	}
+
 	return filepath.Join(home, ".cache", "claude-notifier", "dedup.json"), nil
 }
 
 // hashMessage returns the sha256 hex digest of the final message body.
 func hashMessage(msg string) string {
 	h := sha256.Sum256([]byte(msg))
+
 	return hex.EncodeToString(h[:])
 }
 
 // loadDedup reads the dedup state file. Missing or corrupted files yield
 // an empty store rather than an error — dedup is best-effort.
 func loadDedup() dedupStore {
-	p, err := dedupPath()
+	path, err := dedupPath()
 	if err != nil {
 		return dedupStore{Sessions: map[string]dedupEntry{}}
 	}
-	data, err := os.ReadFile(p)
+
+	data, err := os.ReadFile(path)
 	if err != nil {
 		return dedupStore{Sessions: map[string]dedupEntry{}}
 	}
-	var s dedupStore
-	if err := json.Unmarshal(data, &s); err != nil {
+
+	var store dedupStore
+	err = json.Unmarshal(data, &store)
+	if err != nil {
 		return dedupStore{Sessions: map[string]dedupEntry{}}
 	}
-	if s.Sessions == nil {
-		s.Sessions = map[string]dedupEntry{}
+
+	if store.Sessions == nil {
+		store.Sessions = map[string]dedupEntry{}
 	}
-	return s
+
+	return store
 }
 
 // saveDedup persists the dedup state, creating parent dirs as needed.
-func saveDedup(s dedupStore) error {
-	p, err := dedupPath()
+func saveDedup(store dedupStore) error {
+	path, err := dedupPath()
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
+
+	err = os.MkdirAll(filepath.Dir(path), dedupDirPerms)
+	if err != nil {
 		return fmt.Errorf("creating cache dir: %w", err)
 	}
-	data, err := json.MarshalIndent(s, "", "  ")
+
+	data, err := json.MarshalIndent(store, "", "  ")
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(p, data, 0o600)
+
+	return os.WriteFile(path, data, dedupFilePerms)
 }
 
 // ShouldSend reports whether a message should be sent. Returns false only
@@ -96,6 +112,7 @@ func ShouldSend(sessionID, msg string) bool {
 	if sessionID == "" {
 		return true
 	}
+
 	h := hashMessage(msg)
 	s := loadDedup()
 	if entry, ok := s.Sessions[sessionID]; ok {
@@ -103,6 +120,7 @@ func ShouldSend(sessionID, msg string) bool {
 			return false
 		}
 	}
+
 	return true
 }
 
@@ -113,19 +131,21 @@ func Record(sessionID, msg string) {
 	if sessionID == "" {
 		return
 	}
+
 	h := hashMessage(msg)
-	s := loadDedup()
-	s.Sessions[sessionID] = dedupEntry{Hash: h, TS: time.Now()}
+	store := loadDedup()
+	store.Sessions[sessionID] = dedupEntry{Hash: h, TS: time.Now()}
 
 	// Drop expired entries so the file can't grow without bound.
 	cutoff := time.Now().Add(-dedupRetain)
-	for sid, e := range s.Sessions {
+	for sid, e := range store.Sessions {
 		if e.TS.Before(cutoff) {
-			delete(s.Sessions, sid)
+			delete(store.Sessions, sid)
 		}
 	}
 
-	if err := saveDedup(s); err != nil {
+	err := saveDedup(store)
+	if err != nil {
 		slog.Warn("saving dedup state", "error", err)
 	}
 }

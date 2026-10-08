@@ -22,6 +22,7 @@ type fakeNotifier struct {
 func (f *fakeNotifier) Name() string { return "fake" }
 func (f *fakeNotifier) Send(_ context.Context, n notifier.Notification) error {
 	f.last = n
+
 	return nil
 }
 
@@ -68,6 +69,7 @@ func newFakeRegistry(t *testing.T) (*notifier.Registry, *fakeNotifier) {
 	fake := &fakeNotifier{}
 	reg := notifier.NewRegistry()
 	require.NoError(t, reg.Register("fake", func() notifier.Notifier { return fake }))
+
 	return reg, fake
 }
 
@@ -99,12 +101,13 @@ func TestStopCommand(t *testing.T) {
 	oldStdin := os.Stdin
 	t.Cleanup(func() { os.Stdin = oldStdin })
 
-	r, w, err := os.Pipe()
+	reader, w, err := os.Pipe()
 	require.NoError(t, err)
-	_, err = w.WriteString(`{"session_id":"abc","transcript_path":"/tmp/t.jsonl","cwd":"/Users/me/myproject","hook_event_name":"Stop"}`)
+	_, err = w.WriteString(`{"session_id":"abc","transcript_path":"/tmp/t.jsonl",` +
+		`"cwd":"/Users/me/myproject","hook_event_name":"Stop"}`)
 	require.NoError(t, err)
 	w.Close()
-	os.Stdin = r
+	os.Stdin = reader
 
 	app := appcli.New("test", reg)
 	err = app.Run([]string{"claude-notifier", "--config", configPath, "stop"})
@@ -128,12 +131,12 @@ func TestStopCommandInvalidJSON(t *testing.T) {
 	oldStdin := os.Stdin
 	t.Cleanup(func() { os.Stdin = oldStdin })
 
-	r, w, err := os.Pipe()
+	reader, w, err := os.Pipe()
 	require.NoError(t, err)
 	_, err = w.WriteString(`not json`)
 	require.NoError(t, err)
 	w.Close()
-	os.Stdin = r
+	os.Stdin = reader
 
 	var errBuf bytes.Buffer
 	app := appcli.New("test", reg)
@@ -155,22 +158,22 @@ func TestStopCommandEmptyCwdFallsBackToGetwd(t *testing.T) {
 	oldStdin := os.Stdin
 	t.Cleanup(func() { os.Stdin = oldStdin })
 
-	r, w, err := os.Pipe()
+	reader, w, err := os.Pipe()
 	require.NoError(t, err)
 	_, err = w.WriteString(`{"session_id":"abc","hook_event_name":"Stop"}`)
 	require.NoError(t, err)
 	w.Close()
-	os.Stdin = r
+	os.Stdin = reader
 
-	wd, err := os.Getwd()
+	workDir, err := os.Getwd()
 	require.NoError(t, err)
 
 	app := appcli.New("test", reg)
 	err = app.Run([]string{"claude-notifier", "--config", configPath, "stop"})
 	require.NoError(t, err)
 
-	assert.Equal(t, wd, fake.last.Cwd)
-	assert.True(t, strings.HasSuffix(fake.last.Message, filepath.Base(wd)),
+	assert.Equal(t, workDir, fake.last.Cwd)
+	assert.True(t, strings.HasSuffix(fake.last.Message, filepath.Base(workDir)),
 		"message should include project name; got %q", fake.last.Message)
 	assert.Equal(t, "stop", fake.last.NotificationType)
 }
@@ -193,18 +196,19 @@ func TestStopCommandIncludesLastPromptAndReply(t *testing.T) {
 	oldStdin := os.Stdin
 	t.Cleanup(func() { os.Stdin = oldStdin })
 
-	r, w, err := os.Pipe()
+	reader, w, err := os.Pipe()
 	require.NoError(t, err)
-	_, err = w.WriteString(`{"session_id":"abc","transcript_path":"` + transcriptPath + `","cwd":"/Users/me/myproject","hook_event_name":"Stop"}`)
+	_, err = w.WriteString(`{"session_id":"abc","transcript_path":"` + transcriptPath +
+		`","cwd":"/Users/me/myproject","hook_event_name":"Stop"}`)
 	require.NoError(t, err)
 	w.Close()
-	os.Stdin = r
+	os.Stdin = reader
 
 	app := appcli.New("test", reg)
 	err = app.Run([]string{"claude-notifier", "--config", configPath, "stop"})
 	require.NoError(t, err)
 
-	assert.Contains(t, fake.last.Message, "💬 你: please fix the bug")
+	assert.Contains(t, fake.last.Message, "💬 \u4f60: please fix the bug")
 	assert.Contains(t, fake.last.Message, "🤖 AI: done, all green")
 	assert.NotContains(t, fake.last.Message, "Conversation ended")
 	assert.Equal(t, "stop", fake.last.NotificationType)
@@ -221,12 +225,13 @@ func TestStopCommandFallsBackWhenTranscriptMissing(t *testing.T) {
 	oldStdin := os.Stdin
 	t.Cleanup(func() { os.Stdin = oldStdin })
 
-	r, w, err := os.Pipe()
+	reader, w, err := os.Pipe()
 	require.NoError(t, err)
-	_, err = w.WriteString(`{"session_id":"abc","transcript_path":"` + filepath.Join(dir, "missing.jsonl") + `","cwd":"/Users/me/myproject","hook_event_name":"Stop"}`)
+	_, err = w.WriteString(`{"session_id":"abc","transcript_path":"` + filepath.Join(dir, "missing.jsonl") +
+		`","cwd":"/Users/me/myproject","hook_event_name":"Stop"}`)
 	require.NoError(t, err)
 	w.Close()
-	os.Stdin = r
+	os.Stdin = reader
 
 	app := appcli.New("test", reg)
 	err = app.Run([]string{"claude-notifier", "--config", configPath, "stop"})
@@ -243,12 +248,12 @@ func runSend(t *testing.T, reg *notifier.Registry, configPath, payload string) {
 	oldStdin := os.Stdin
 	t.Cleanup(func() { os.Stdin = oldStdin })
 
-	r, w, err := os.Pipe()
+	reader, w, err := os.Pipe()
 	require.NoError(t, err)
 	_, err = w.WriteString(payload)
 	require.NoError(t, err)
 	w.Close()
-	os.Stdin = r
+	os.Stdin = reader
 
 	app := appcli.New("test", reg)
 	err = app.Run([]string{"claude-notifier", "--config", configPath})
@@ -270,11 +275,12 @@ func TestSendActionIdlePromptAppendsPromptReply(t *testing.T) {
 	}, "\n") + "\n"
 	require.NoError(t, os.WriteFile(transcriptPath, []byte(content), 0o600))
 
-	payload := `{"message":"Claude is waiting for your input","notification_type":"idle_prompt","transcript_path":"` + transcriptPath + `","cwd":"/Users/me/myproject"}`
+	payload := `{"message":"Claude is waiting for your input","notification_type":"idle_prompt",` +
+		`"transcript_path":"` + transcriptPath + `","cwd":"/Users/me/myproject"}`
 	runSend(t, reg, configPath, payload)
 
 	assert.Contains(t, fake.last.Message, "Claude is waiting for your input")
-	assert.Contains(t, fake.last.Message, "💬 你: what is 1+1?")
+	assert.Contains(t, fake.last.Message, "💬 \u4f60: what is 1+1?")
 	assert.Contains(t, fake.last.Message, "🤖 AI: it is 2")
 	assert.Equal(t, "idle_prompt", fake.last.NotificationType)
 }
@@ -294,11 +300,12 @@ func TestSendActionOtherTypesDoNotModify(t *testing.T) {
 	}, "\n") + "\n"
 	require.NoError(t, os.WriteFile(transcriptPath, []byte(content), 0o600))
 
-	payload := `{"message":"Claude needs permission","notification_type":"permission_prompt","transcript_path":"` + transcriptPath + `","cwd":"/Users/me/myproject"}`
+	payload := `{"message":"Claude needs permission","notification_type":"permission_prompt",` +
+		`"transcript_path":"` + transcriptPath + `","cwd":"/Users/me/myproject"}`
 	runSend(t, reg, configPath, payload)
 
 	assert.Equal(t, "Claude needs permission", fake.last.Message)
-	assert.NotContains(t, fake.last.Message, "💬 你:")
+	assert.NotContains(t, fake.last.Message, "💬 \u4f60:")
 	assert.NotContains(t, fake.last.Message, "🤖 AI:")
 	assert.Equal(t, "permission_prompt", fake.last.NotificationType)
 }
@@ -311,11 +318,12 @@ func TestSendActionIdlePromptWithoutTranscript(t *testing.T) {
 	configPath := filepath.Join(dir, "config.toml")
 	writeConfig(t, configPath)
 
-	payload := `{"message":"Claude is waiting for your input","notification_type":"idle_prompt","transcript_path":"` + filepath.Join(dir, "missing.jsonl") + `","cwd":"/Users/me/myproject"}`
+	payload := `{"message":"Claude is waiting for your input","notification_type":"idle_prompt",` +
+		`"transcript_path":"` + filepath.Join(dir, "missing.jsonl") + `","cwd":"/Users/me/myproject"}`
 	runSend(t, reg, configPath, payload)
 
 	assert.Equal(t, "Claude is waiting for your input", fake.last.Message)
-	assert.NotContains(t, fake.last.Message, "💬 你:")
+	assert.NotContains(t, fake.last.Message, "💬 \u4f60:")
 	assert.NotContains(t, fake.last.Message, "🤖 AI:")
 	assert.Equal(t, "idle_prompt", fake.last.NotificationType)
 }
